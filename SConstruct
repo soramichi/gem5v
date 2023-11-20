@@ -285,7 +285,8 @@ if not GetOption('ignore_style') and hgdir.exists() and sys.stdin.isatty():
 ###################################################
 
 # Find default configuration & binary.
-Default(environ.get('M5_DEFAULT_BINARY', 'build/ALPHA/gem5.debug'))
+#Default(environ.get('M5_DEFAULT_BINARY', 'build/ALPHA/gem5.debug'))
+Default(environ.get('M5_DEFAULT_BINARY', 'build/X86/gem5.debug'))
 
 # helper function: find last occurrence of element in list
 def rfind(l, elt, offs = -1):
@@ -510,7 +511,8 @@ if main['GCC'] + main['SUNCC'] + main['ICC'] + main['CLANG'] > 1:
 if main['GCC']:
     main.Append(CCFLAGS=['-pipe'])
     main.Append(CCFLAGS=['-fno-strict-aliasing'])
-    main.Append(CCFLAGS=['-Wall', '-Wno-sign-compare', '-Wundef'])
+    main.Append(CCFLAGS=['-Wall', '-Wno-sign-compare', '-Wundef', '-Wno-deprecated-declarations', '-Wno-address-of-packed-member'])
+    #main.Append(CCFLAGS=['-Wno-sign-compare', '-Wundef'])
     # Read the GCC version to check for versions with bugs
     # Note CCVERSION doesn't work here because it is run with the CC
     # before we override it from the command line
@@ -801,10 +803,10 @@ for lib in py_libs:
         Exit(1)
 
 # On Solaris you need to use libsocket for socket ops
-if not conf.CheckLibWithHeader(None, 'sys/socket.h', 'C++', 'accept(0,0,0);'):
-   if not conf.CheckLibWithHeader('socket', 'sys/socket.h', 'C++', 'accept(0,0,0);'):
-       print "Can't find library with socket calls (e.g. accept())"
-       Exit(1)
+#if not conf.CheckLibWithHeader(None, 'sys/socket.h', 'C++', 'accept(0,0,0);'):
+#   if not conf.CheckLibWithHeader('socket', 'sys/socket.h', 'C++', 'accept(0,0,0);'):
+#       print "Can't find library with socket calls (e.g. accept())"
+#       Exit(1)
 
 # Check for zlib.  If the check passes, libz will be automatically
 # added to the LIBS environment variable.

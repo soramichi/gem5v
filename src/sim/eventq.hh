@@ -82,7 +82,8 @@ class Event : public Serializable
     bool
     initialized() const
     {
-        return this && (flags & InitMask) == Initialized;
+      //return this && (flags & InitMask) == Initialized;
+      return (flags & InitMask) == Initialized;
     }
 
   public:

@@ -66,8 +66,9 @@ TLB::TLB(const Params *p) : BaseTLB(p), configAddress(0), size(p->size),
     if (!size)
         fatal("TLBs must have a non-zero size.\n");
     tlb = new TlbEntry[size];
-    std::memset(tlb, 0, sizeof(TlbEntry) * size);
-
+    //std::memset(tlb, 0, sizeof(TlbEntry) * size);
+    
+    
     for (int x = 0; x < size; x++) {
         tlb[x].trieHandle = NULL;
         freeList.push_back(&tlb[x]);

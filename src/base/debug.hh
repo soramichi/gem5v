@@ -82,7 +82,7 @@ class CompoundFlag : public SimpleFlag
     void
     addFlag(Flag &f)
     {
-        if (&f != NULL)
+      //if (&f != NULL)
             _kids.push_back(&f);
     }
 

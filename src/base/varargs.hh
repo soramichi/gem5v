@@ -147,6 +147,20 @@ struct Any : public Base<RECV>
     }
 };
 
+template <class RECV>
+struct Any<std::__cxx11::basic_stringstream<char>, RECV> : public Base<RECV>
+{
+    const std::__cxx11::basic_stringstream<char> &argument;
+
+    Any(const std::__cxx11::basic_stringstream<char> &arg) : argument(arg) {}
+
+    virtual void
+    add_arg(RECV &receiver) const
+    {
+      receiver.add_arg(argument.str());
+    }
+};
+
 template <typename T, class RECV>
 struct Any<T *, RECV> : public Base<RECV>
 {
