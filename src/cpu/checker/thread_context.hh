@@ -1,5 +1,6 @@
 /*
- * Copyright (c) 2011 ARM Limited
+ * Copyright (c) 2011-2012, 2016-2018, 2020-2021 Arm Limited
+ * Copyright (c) 2013 Advanced Micro Devices, Inc.
  * All rights reserved
  *
  * The license below extends only to copyright in the software and shall
@@ -36,27 +37,19 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * Authors: Kevin Lim
  */
 
 #ifndef __CPU_CHECKER_THREAD_CONTEXT_HH__
 #define __CPU_CHECKER_THREAD_CONTEXT_HH__
 
-#include "arch/types.hh"
-#include "config/the_isa.hh"
+#include "arch/generic/pcstate.hh"
 #include "cpu/checker/cpu.hh"
 #include "cpu/simple_thread.hh"
 #include "cpu/thread_context.hh"
 #include "debug/Checker.hh"
 
-class EndQuiesceEvent;
-namespace TheISA {
-    namespace Kernel {
-        class Statistics;
-    };
-    class Decoder;
-};
+namespace gem5
+{
 
 /**
  * Derived ThreadContext class for use with the Checker.  The template
@@ -88,117 +81,137 @@ class CheckerThreadContext : public ThreadContext
     CheckerCPU *checkerCPU;
 
   public:
+    bool
+    schedule(PCEvent *e) override
+    {
+        [[maybe_unused]] bool check_ret = checkerTC->schedule(e);
+        bool actual_ret = actualTC->schedule(e);
+        assert(actual_ret == check_ret);
+        return actual_ret;
+    }
 
-    BaseCPU *getCpuPtr() { return actualTC->getCpuPtr(); }
+    bool
+    remove(PCEvent *e) override
+    {
+        [[maybe_unused]] bool check_ret = checkerTC->remove(e);
+        bool actual_ret = actualTC->remove(e);
+        assert(actual_ret == check_ret);
+        return actual_ret;
+    }
 
-    int cpuId() { return actualTC->cpuId(); }
+    void
+    scheduleInstCountEvent(Event *event, Tick count) override
+    {
+        actualTC->scheduleInstCountEvent(event, count);
+    }
+    void
+    descheduleInstCountEvent(Event *event) override
+    {
+        actualTC->descheduleInstCountEvent(event);
+    }
+    Tick
+    getCurrentInstCount() override
+    {
+        return actualTC->getCurrentInstCount();
+    }
 
-    int contextId() { return actualTC->contextId(); }
+    BaseCPU *getCpuPtr() override { return actualTC->getCpuPtr(); }
 
-    void setContextId(int id)
+    uint32_t socketId() const override { return actualTC->socketId(); }
+
+    int cpuId() const override { return actualTC->cpuId(); }
+
+    ContextID contextId() const override { return actualTC->contextId(); }
+
+    void
+    setContextId(ContextID id) override
     {
        actualTC->setContextId(id);
        checkerTC->setContextId(id);
     }
 
     /** Returns this thread's ID number. */
-    int threadId() { return actualTC->threadId(); }
-    void setThreadId(int id)
+    int threadId() const override { return actualTC->threadId(); }
+    void
+    setThreadId(int id) override
     {
         checkerTC->setThreadId(id);
         actualTC->setThreadId(id);
     }
 
-    TheISA::TLB *getITBPtr() { return actualTC->getITBPtr(); }
+    BaseMMU *getMMUPtr() override { return actualTC->getMMUPtr(); }
 
-    TheISA::TLB *getDTBPtr() { return actualTC->getDTBPtr(); }
-
-    CheckerCPU *getCheckerCpuPtr()
+    CheckerCPU *
+    getCheckerCpuPtr() override
     {
         return checkerCPU;
     }
 
-    TheISA::Decoder *getDecoderPtr() { return actualTC->getDecoderPtr(); }
+    BaseISA *getIsaPtr() const override { return actualTC->getIsaPtr(); }
 
-    System *getSystemPtr() { return actualTC->getSystemPtr(); }
+    InstDecoder *
+    getDecoderPtr() override
+    {
+        return actualTC->getDecoderPtr();
+    }
 
-    TheISA::Kernel::Statistics *getKernelStats()
-    { return actualTC->getKernelStats(); }
+    System *getSystemPtr() override { return actualTC->getSystemPtr(); }
 
-    Process *getProcessPtr() { return actualTC->getProcessPtr(); }
+    Process *getProcessPtr() override { return actualTC->getProcessPtr(); }
 
-    PortProxy &getPhysProxy() { return actualTC->getPhysProxy(); }
+    void setProcessPtr(Process *p) override { actualTC->setProcessPtr(p); }
 
-    FSTranslatingPortProxy &getVirtProxy()
-    { return actualTC->getVirtProxy(); }
-
-    void initMemProxies(ThreadContext *tc)
-    { actualTC->initMemProxies(tc); }
-
-    void connectMemPorts(ThreadContext *tc)
+    void
+    connectMemPorts(ThreadContext *tc)
     {
         actualTC->connectMemPorts(tc);
     }
 
-    SETranslatingPortProxy &getMemProxy() { return actualTC->getMemProxy(); }
+    Status status() const override { return actualTC->status(); }
 
-    /** Executes a syscall in SE mode. */
-    void syscall(int64_t callnum)
-    { return actualTC->syscall(callnum); }
-
-    Status status() const { return actualTC->status(); }
-
-    void setStatus(Status new_status)
+    void
+    setStatus(Status new_status) override
     {
         actualTC->setStatus(new_status);
         checkerTC->setStatus(new_status);
     }
 
-    /// Set the status to Active.  Optional delay indicates number of
-    /// cycles to wait before beginning execution.
-    void activate(Cycles delay = Cycles(1))
-    { actualTC->activate(delay); }
+    /// Set the status to Active.
+    void activate() override { actualTC->activate(); }
 
     /// Set the status to Suspended.
-    void suspend(Cycles delay) { actualTC->suspend(delay); }
+    void suspend() override { actualTC->suspend(); }
 
     /// Set the status to Halted.
-    void halt(Cycles delay) { actualTC->halt(delay); }
+    void halt() override { actualTC->halt(); }
 
-    void dumpFuncProfile() { actualTC->dumpFuncProfile(); }
-
-    void takeOverFrom(ThreadContext *oldContext)
+    void
+    takeOverFrom(ThreadContext *oldContext) override
     {
         actualTC->takeOverFrom(oldContext);
         checkerTC->copyState(oldContext);
     }
 
-    void regStats(const std::string &name)
+    void
+    regStats(const std::string &name) override
     {
         actualTC->regStats(name);
         checkerTC->regStats(name);
     }
 
-    void serialize(std::ostream &os) { actualTC->serialize(os); }
-    void unserialize(Checkpoint *cp, const std::string &section)
-    { actualTC->unserialize(cp, section); }
-
-    EndQuiesceEvent *getQuiesceEvent() { return actualTC->getQuiesceEvent(); }
-
-    Tick readLastActivate() { return actualTC->readLastActivate(); }
-    Tick readLastSuspend() { return actualTC->readLastSuspend(); }
-
-    void profileClear() { return actualTC->profileClear(); }
-    void profileSample() { return actualTC->profileSample(); }
+    Tick readLastActivate() override { return actualTC->readLastActivate(); }
+    Tick readLastSuspend() override { return actualTC->readLastSuspend(); }
 
     // @todo: Do I need this?
-    void copyArchRegs(ThreadContext *tc)
+    void
+    copyArchRegs(ThreadContext *tc) override
     {
         actualTC->copyArchRegs(tc);
         checkerTC->copyArchRegs(tc);
     }
 
-    void clearArchRegs()
+    void
+    clearArchRegs() override
     {
         actualTC->clearArchRegs();
         checkerTC->clearArchRegs();
@@ -207,39 +220,44 @@ class CheckerThreadContext : public ThreadContext
     //
     // New accessors for new decoder.
     //
-    uint64_t readIntReg(int reg_idx)
-    { return actualTC->readIntReg(reg_idx); }
-
-    FloatReg readFloatReg(int reg_idx)
-    { return actualTC->readFloatReg(reg_idx); }
-
-    FloatRegBits readFloatRegBits(int reg_idx)
-    { return actualTC->readFloatRegBits(reg_idx); }
-
-    void setIntReg(int reg_idx, uint64_t val)
+    RegVal
+    getReg(const RegId &reg) const override
     {
-        actualTC->setIntReg(reg_idx, val);
-        checkerTC->setIntReg(reg_idx, val);
+        return actualTC->getReg(reg);
     }
 
-    void setFloatReg(int reg_idx, FloatReg val)
+    void
+    getReg(const RegId &reg, void *val) const override
     {
-        actualTC->setFloatReg(reg_idx, val);
-        checkerTC->setFloatReg(reg_idx, val);
+        actualTC->getReg(reg, val);
     }
 
-    void setFloatRegBits(int reg_idx, FloatRegBits val)
+    void *
+    getWritableReg(const RegId &reg) override
     {
-        actualTC->setFloatRegBits(reg_idx, val);
-        checkerTC->setFloatRegBits(reg_idx, val);
+        return actualTC->getWritableReg(reg);
+    }
+
+    void
+    setReg(const RegId &reg, RegVal val) override
+    {
+        actualTC->setReg(reg, val);
+        checkerTC->setReg(reg, val);
+    }
+
+    void
+    setReg(const RegId &reg, const void *val) override
+    {
+        actualTC->setReg(reg, val);
+        checkerTC->setReg(reg, val);
     }
 
     /** Reads this thread's PC state. */
-    TheISA::PCState pcState()
-    { return actualTC->pcState(); }
+    const PCStateBase &pcState() const override { return actualTC->pcState(); }
 
     /** Sets this thread's PC state. */
-    void pcState(const TheISA::PCState &val)
+    void
+    pcState(const PCStateBase &val) override
     {
         DPRINTF(Checker, "Changing PC to %s, old PC %s\n",
                          val, checkerTC->pcState());
@@ -248,30 +266,26 @@ class CheckerThreadContext : public ThreadContext
         return actualTC->pcState(val);
     }
 
-    void pcStateNoRecord(const TheISA::PCState &val)
+    void
+    pcStateNoRecord(const PCStateBase &val) override
     {
         return actualTC->pcState(val);
     }
 
-    /** Reads this thread's PC. */
-    Addr instAddr()
-    { return actualTC->instAddr(); }
+    RegVal
+    readMiscRegNoEffect(RegIndex misc_reg) const override
+    {
+        return actualTC->readMiscRegNoEffect(misc_reg);
+    }
 
-    /** Reads this thread's next PC. */
-    Addr nextInstAddr()
-    { return actualTC->nextInstAddr(); }
+    RegVal
+    readMiscReg(RegIndex misc_reg) override
+    {
+        return actualTC->readMiscReg(misc_reg);
+    }
 
-    /** Reads this thread's next PC. */
-    MicroPC microPC()
-    { return actualTC->microPC(); }
-
-    MiscReg readMiscRegNoEffect(int misc_reg)
-    { return actualTC->readMiscRegNoEffect(misc_reg); }
-
-    MiscReg readMiscReg(int misc_reg)
-    { return actualTC->readMiscReg(misc_reg); }
-
-    void setMiscRegNoEffect(int misc_reg, const MiscReg &val)
+    void
+    setMiscRegNoEffect(RegIndex misc_reg, RegVal val) override
     {
         DPRINTF(Checker, "Setting misc reg with no effect: %d to both Checker"
                          " and O3..\n", misc_reg);
@@ -279,7 +293,8 @@ class CheckerThreadContext : public ThreadContext
         actualTC->setMiscRegNoEffect(misc_reg, val);
     }
 
-    void setMiscReg(int misc_reg, const MiscReg &val)
+    void
+    setMiscReg(RegIndex misc_reg, RegVal val) override
     {
         DPRINTF(Checker, "Setting misc reg with effect: %d to both Checker"
                          " and O3..\n", misc_reg);
@@ -287,21 +302,39 @@ class CheckerThreadContext : public ThreadContext
         actualTC->setMiscReg(misc_reg, val);
     }
 
-    int flattenIntIndex(int reg) { return actualTC->flattenIntIndex(reg); }
-    int flattenFloatIndex(int reg) { return actualTC->flattenFloatIndex(reg); }
+    unsigned
+    readStCondFailures() const override
+    {
+        return actualTC->readStCondFailures();
+    }
 
-    unsigned readStCondFailures()
-    { return actualTC->readStCondFailures(); }
-
-    void setStCondFailures(unsigned sc_failures)
+    void
+    setStCondFailures(unsigned sc_failures) override
     {
         actualTC->setStCondFailures(sc_failures);
     }
 
-    // @todo: Fix this!
-    bool misspeculating() { return actualTC->misspeculating(); }
+    // hardware transactional memory
+    void
+    htmAbortTransaction(uint64_t htm_uid, HtmFailureFaultCause cause) override
+    {
+        panic("function not implemented");
+    }
 
-    Counter readFuncExeInst() { return actualTC->readFuncExeInst(); }
+    BaseHTMCheckpointPtr&
+    getHtmCheckpointPtr() override
+    {
+        return actualTC->getHtmCheckpointPtr();
+    }
+
+    void
+    setHtmCheckpointPtr(BaseHTMCheckpointPtr new_cpt) override
+    {
+        panic("function not implemented");
+    }
+
 };
+
+} // namespace gem5
 
 #endif // __CPU_CHECKER_EXEC_CONTEXT_HH__

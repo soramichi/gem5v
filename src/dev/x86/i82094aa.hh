@@ -24,8 +24,6 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * Authors: Gabe Black
  */
 
 #ifndef __DEV_X86_I82094AA_HH__
@@ -33,18 +31,22 @@
 
 #include <map>
 
+#include "arch/x86/intmessage.hh"
 #include "base/bitunion.hh"
 #include "dev/x86/intdev.hh"
+#include "dev/intpin.hh"
 #include "dev/io_device.hh"
 #include "params/I82094AA.hh"
+
+namespace gem5
+{
 
 namespace X86ISA
 {
 
-class I8259;
 class Interrupts;
 
-class I82094AA : public PioDevice, public IntDev
+class I82094AA : public BasicPioDevice
 {
   public:
     BitUnion64(RedirTableEntry)
@@ -64,11 +66,6 @@ class I82094AA : public PioDevice, public IntDev
     EndBitUnion(RedirTableEntry)
 
   protected:
-    Tick latency;
-    Addr pioAddr;
-
-    I8259 * extIntPic;
-
     uint8_t regSel;
     uint8_t initialApicId;
     uint8_t id;
@@ -84,58 +81,39 @@ class I82094AA : public PioDevice, public IntDev
     RedirTableEntry redirTable[TableSize];
     bool pinStates[TableSize];
 
+    std::vector<IntSinkPin<I82094AA> *> inputs;
+
+    IntRequestPort<I82094AA> intRequestPort;
+
+    void signalInterrupt(TriggerIntMessage message);
+
   public:
-    typedef I82094AAParams Params;
+    using Params = I82094AAParams;
 
-    const Params *
-    params() const
-    {
-        return dynamic_cast<const Params *>(_params);
-    }
+    I82094AA(const Params &p);
 
-    I82094AA(Params *p);
+    void init() override;
 
-    void init();
-
-    Tick read(PacketPtr pkt);
-    Tick write(PacketPtr pkt);
-
-    AddrRangeList getAddrRanges() const
-    {
-        AddrRangeList ranges;
-        ranges.push_back(RangeEx(pioAddr, pioAddr + 4));
-        ranges.push_back(RangeEx(pioAddr + 16, pioAddr + 20));
-        return ranges;
-    }
-
-    AddrRangeList getIntAddrRange() const
-    {
-        AddrRangeList ranges;
-        ranges.push_back(RangeEx(x86InterruptAddress(initialApicId, 0),
-                                 x86InterruptAddress(initialApicId, 0) +
-                                 PhysAddrAPICRangeSize));
-        return ranges;
-    }
+    Tick read(PacketPtr pkt) override;
+    Tick write(PacketPtr pkt) override;
 
     void writeReg(uint8_t offset, uint32_t value);
     uint32_t readReg(uint8_t offset);
 
-    BaseMasterPort &getMasterPort(const std::string &if_name,
-                                  PortID idx = InvalidPortID)
-    {
-        if (if_name == "int_master")
-            return intMasterPort;
-        return PioDevice::getMasterPort(if_name, idx);
-    }
+    Port &getPort(const std::string &if_name,
+                  PortID idx=InvalidPortID) override;
 
-    void signalInterrupt(int line);
+    bool recvResponse(PacketPtr pkt);
+
+    void requestInterrupt(int line);
     void raiseInterruptPin(int number);
     void lowerInterruptPin(int number);
 
-    virtual void serialize(std::ostream &os);
-    virtual void unserialize(Checkpoint *cp, const std::string &section);
+    void serialize(CheckpointOut &cp) const override;
+    void unserialize(CheckpointIn &cp) override;
 };
 
 } // namespace X86ISA
+} // namespace gem5
 
 #endif //__DEV_X86_SOUTH_BRIDGE_I8254_HH__

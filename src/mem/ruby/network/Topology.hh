@@ -1,4 +1,5 @@
 /*
+ * Copyright (c) 2020 Advanced Micro Devices, Inc.
  * Copyright (c) 1999-2008 Mark D. Hill and David A. Wood
  * All rights reserved.
  *
@@ -37,77 +38,84 @@
  * nodes. All edges have latency.
  */
 
-#ifndef __MEM_RUBY_NETWORK_SIMPLE_TOPOLOGY_HH__
-#define __MEM_RUBY_NETWORK_SIMPLE_TOPOLOGY_HH__
+#ifndef __MEM_RUBY_NETWORK_TOPOLOGY_HH__
+#define __MEM_RUBY_NETWORK_TOPOLOGY_HH__
 
 #include <iostream>
-#include <string>
 #include <vector>
 
-#include "mem/protocol/LinkDirection.hh"
 #include "mem/ruby/common/TypeDefines.hh"
-#include "mem/ruby/network/BasicRouter.hh"
-#include "params/Topology.hh"
-#include "sim/sim_object.hh"
+#include "mem/ruby/network/BasicLink.hh"
+#include "mem/ruby/protocol/LinkDirection.hh"
+
+namespace gem5
+{
+
+namespace ruby
+{
 
 class NetDest;
 class Network;
 
-typedef std::vector<std::vector<int> > Matrix;
+/*
+ * We use a three-dimensional vector matrix for calculating
+ * the shortest paths for each pair of source and destination
+ * and for each type of virtual network. The three dimensions
+ * represent the source ID, destination ID, and vnet number.
+ */
+typedef std::vector<std::vector<std::vector<int>>> Matrix;
 
-struct LinkEntry 
+struct LinkEntry
 {
     BasicLink *link;
-    LinkDirection direction;
+    PortDirection src_outport_dirn;
+    PortDirection dst_inport_dirn;
 };
 
-typedef std::map<std::pair<int, int>, LinkEntry> LinkMap;
+typedef std::map<std::pair<SwitchID, SwitchID>,
+             std::vector<LinkEntry>> LinkMap;
 
-class Topology : public SimObject
+class Topology
 {
   public:
-    typedef TopologyParams Params;
-    Topology(const Params *p);
-    virtual ~Topology() {}
-    const Params *params() const { return (const Params *)_params; }
+    Topology(uint32_t num_nodes, uint32_t num_routers, uint32_t num_vnets,
+             const std::vector<BasicExtLink *> &ext_links,
+             const std::vector<BasicIntLink *> &int_links);
 
-    void init();
-    int numSwitches() const { return m_number_of_switches; }
-    void createLinks(Network *net, bool isReconfiguration);
-
-    void initNetworkPtr(Network* net_ptr);
-
-    const std::string getName() { return m_name; }
-    void printStats(std::ostream& out) const;
-    void clearStats();
+    uint32_t numSwitches() const { return m_number_of_switches; }
+    void createLinks(Network *net);
     void print(std::ostream& out) const { out << "[Topology]"; }
 
-  protected:
+  private:
     void addLink(SwitchID src, SwitchID dest, BasicLink* link,
-                 LinkDirection dir);
+                 PortDirection src_outport_dirn = "",
+                 PortDirection dest_inport_dirn = "");
     void makeLink(Network *net, SwitchID src, SwitchID dest,
-                  const NetDest& routing_table_entry, 
-                  bool isReconfiguration);
+                  std::vector<NetDest>& routing_table_entry);
 
-    std::string getDesignStr();
-    // Private copy constructor and assignment operator
-    Topology(const Topology& obj);
-    Topology& operator=(const Topology& obj);
+    // Helper functions based on chapter 29 of Cormen et al.
+    void extend_shortest_path(Matrix &current_dist, Matrix &latencies,
+                              Matrix &inter_switches);
 
-    std::string m_name;
-    bool m_print_config;
-    NodeID m_nodes;
-    int m_number_of_switches;
+    Matrix shortest_path(const Matrix &weights,
+            Matrix &latencies, Matrix &inter_switches);
 
-    std::vector<AbstractController*> m_controller_vector;
+    bool link_is_shortest_path_to_node(SwitchID src, SwitchID next,
+            SwitchID final, const Matrix &weights, const Matrix &dist,
+            int vnet);
+
+    NetDest shortest_path_to_node(SwitchID src, SwitchID next,
+                                  const Matrix &weights, const Matrix &dist,
+                                  int vnet);
+
+    const uint32_t m_nodes;
+    const uint32_t m_number_of_switches;
+    int m_vnets;
+
     std::vector<BasicExtLink*> m_ext_link_vector;
     std::vector<BasicIntLink*> m_int_link_vector;
 
-    Matrix m_component_latencies;
-    Matrix m_component_inter_switches;
-
     LinkMap m_link_map;
-    std::vector<BasicRouter*> m_router_vector;
 };
 
 inline std::ostream&
@@ -118,4 +126,7 @@ operator<<(std::ostream& out, const Topology& obj)
     return out;
 }
 
-#endif // __MEM_RUBY_NETWORK_SIMPLE_TOPOLOGY_HH__
+} // namespace ruby
+} // namespace gem5
+
+#endif // __MEM_RUBY_NETWORK_TOPOLOGY_HH__

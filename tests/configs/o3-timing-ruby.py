@@ -23,30 +23,34 @@
 # THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-#
-# Authors: Steve Reinhardt
 
 import m5
 from m5.objects import *
-m5.util.addToPath('../configs/common')
-m5.util.addToPath('../configs/topologies')
-
 
 import ruby_config
+
 ruby_memory = ruby_config.generate("TwoLevel_SplitL1UnifiedL2.rb", 1)
 
 cpu = DerivO3CPU(cpu_id=0)
-cpu.clock = '2GHz'
 
-system = System(cpu = cpu,
-                physmem = ruby_memory,
-                membus = CoherentBus())
-system.physmem.port = system.membus.master
+system = System(
+    cpu=cpu,
+    physmem=ruby_memory,
+    membus=SystemXBar(),
+    mem_mode="timing",
+    clk_domain=SrcClockDomain(clock="1GHz"),
+)
+
+# Create a seperate clock domain for components that should run at
+# CPUs frequency
+system.cpu.clk_domain = SrcClockDomain(clock="2GHz")
+
+system.physmem.port = system.membus.mem_side_ports
 # create the interrupt controller
 cpu.createInterruptController()
-cpu.connectAllPorts(system.membus)
+cpu.connectBus(system.membus)
 
 # Connect the system port for loading of binaries etc
-system.system_port = system.membus.slave
+system.system_port = system.membus.cpu_side_ports
 
-root = Root(full_system = False, system = system)
+root = Root(full_system=False, system=system)

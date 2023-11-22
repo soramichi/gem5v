@@ -1,4 +1,16 @@
 /*
+ * Copyright (c) 2012-2013 ARM Limited
+ * All rights reserved
+ *
+ * The license below extends only to copyright in the software and shall
+ * not be construed as granting a license to any other intellectual
+ * property including but not limited to intellectual property relating
+ * to a hardware implementation of the functionality of the software
+ * licensed hereunder.  You may use the software subject to the license
+ * terms below provided that you ensure that this notice is replicated
+ * unmodified and in its entirety in all distributions of the software,
+ * modified or unmodified, in source code or in binary form.
+ *
  * Copyright (c) 2006 The Regents of The University of Michigan
  * All rights reserved.
  *
@@ -24,13 +36,12 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * Authors: Kevin Lim
  */
 
 #ifndef __CPU_O3_FU_POOL_HH__
 #define __CPU_O3_FU_POOL_HH__
 
+#include <array>
 #include <bitset>
 #include <list>
 #include <string>
@@ -40,8 +51,14 @@
 #include "params/FUPool.hh"
 #include "sim/sim_object.hh"
 
+namespace gem5
+{
+
 class FUDesc;
 class FuncUnit;
+
+namespace o3
+{
 
 /**
  * Pool of FU's, specific to the new CPU model. The old FU pool had lists of
@@ -59,9 +76,9 @@ class FUPool : public SimObject
 {
   private:
     /** Maximum op execution latencies, per op class. */
-    Cycles maxOpLatencies[Num_OpClasses];
-    /** Maximum issue latencies, per op class. */
-    Cycles maxIssueLatencies[Num_OpClasses];
+    std::array<Cycles, Num_OpClasses> maxOpLatencies;
+    /** Whether op is pipelined or not. */
+    std::array<bool, Num_OpClasses> pipelined;
 
     /** Bitvector listing capabilities of this FU pool. */
     std::bitset<Num_OpClasses> capabilityList;
@@ -78,7 +95,8 @@ class FUPool : public SimObject
      * by iterating through it, thus leaving free units at the head of the
      * queue.
      */
-    class FUIdxQueue {
+    class FUIdxQueue
+    {
       public:
         /** Constructs a circular queue of FU indices. */
         FUIdxQueue()
@@ -118,20 +136,20 @@ class FUPool : public SimObject
   public:
     typedef FUPoolParams Params;
     /** Constructs a FU pool. */
-    FUPool(const Params *p);
+    FUPool(const Params &p);
     ~FUPool();
 
-    /** Annotates units that provide memory operations. Included only because
-     *  old FU pool provided this function.
-     */
-    void annotateMemoryUnits(Cycles hit_latency);
-
+    static constexpr auto NoCapableFU = -2;
+    static constexpr auto NoFreeFU = -1;
     /**
-     * Gets a FU providing the requested capability. Will mark the unit as busy,
-     * but leaves the freeing of the unit up to the IEW stage.
+     * Gets a FU providing the requested capability. Will mark the
+     * unit as busy, but leaves the freeing of the unit up to the IEW
+     * stage.
+     *
      * @param capability The capability requested.
-     * @return Returns -2 if the FU pool does not have the capability, -1 if
-     * there is no free FU, and the FU's index otherwise.
+     * @return Returns NoCapableFU if the FU pool does not have the
+     * capability, NoFreeFU if there is no free FU, and the FU's index
+     * otherwise.
      */
     int getUnit(OpClass capability);
 
@@ -153,15 +171,18 @@ class FUPool : public SimObject
     }
 
     /** Returns the issue latency of the given capability. */
-    Cycles getIssueLatency(OpClass capability) {
-        return maxIssueLatencies[capability];
+    bool isPipelined(OpClass capability) {
+        return pipelined[capability];
     }
 
-    /** Switches out functional unit pool. */
-    void switchOut();
+    /** Have all the FUs drained? */
+    bool isDrained() const;
 
     /** Takes over from another CPU's thread. */
-    void takeOver();
+    void takeOverFrom() {};
 };
+
+} // namespace o3
+} // namespace gem5
 
 #endif // __CPU_O3_FU_POOL_HH__

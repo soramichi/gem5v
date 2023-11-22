@@ -1,14 +1,5 @@
-# Copyright (c) 2007 The Hewlett-Packard Development Company
+# Copyright (c) 2013 Andreas Sandberg
 # All rights reserved.
-#
-# The license below extends only to copyright in the software and shall
-# not be construed as granting a license to any other intellectual
-# property including but not limited to intellectual property relating
-# to a hardware implementation of the functionality of the software
-# licensed hereunder.  You may use the software subject to the license
-# terms below provided that you ensure that this notice is replicated
-# unmodified and in its entirety in all distributions of the software,
-# modified or unmodified, in source code or in binary form.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions are
@@ -32,10 +23,211 @@
 # THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-#
-# Authors: Gabe Black
 
-microcode = '''
-# FXSAVE
-# FXRESTORE
-'''
+# Register usage:
+#  t1, t2 == temporaries
+#  t7 == base address (RIP or SIB)
+
+
+loadX87RegTemplate = """
+    ld t1, seg, %(mode)s, "DISPLACEMENT + 32 + 16 * %(idx)i", dataSize=8
+    ld t2, seg, %(mode)s, "DISPLACEMENT + 32 + 16 * %(idx)i + 8", dataSize=2
+    cvtint_fp80 st(%(idx)i), t1, t2
+"""
+
+storeX87RegTemplate = """
+    cvtfp80h_int t1, st(%(idx)i)
+    cvtfp80l_int t2, st(%(idx)i)
+    st t1, seg, %(mode)s, "DISPLACEMENT + 32 + 16 * %(idx)i", dataSize=8
+    st t2, seg, %(mode)s, "DISPLACEMENT + 32 + 16 * %(idx)i + 8", dataSize=2
+"""
+
+loadXMMRegTemplate = """
+    ldfp fpRegIdx("float_reg::xmmLow(%(idx)i)"), seg, %(mode)s, \
+         "DISPLACEMENT + 160 + 16 * %(idx)i", dataSize=8
+    ldfp fpRegIdx("float_reg::xmmHigh(%(idx)i)"), seg, %(mode)s, \
+         "DISPLACEMENT + 160 + 16 * %(idx)i + 8", dataSize=8
+"""
+
+storeXMMRegTemplate = """
+    stfp fpRegIdx("float_reg::xmmLow(%(idx)i)"), seg, %(mode)s, \
+         "DISPLACEMENT + 160 + 16 * %(idx)i", dataSize=8
+    stfp fpRegIdx("float_reg::xmmHigh(%(idx)i)"), seg, %(mode)s, \
+         "DISPLACEMENT + 160 + 16 * %(idx)i + 8", dataSize=8
+"""
+
+loadAllDataRegs = "".join(
+    [loadX87RegTemplate % {"idx": i, "mode": "%(mode)s"} for i in range(8)]
+) + "".join(
+    [loadXMMRegTemplate % {"idx": i, "mode": "%(mode)s"} for i in range(16)]
+)
+
+storeAllDataRegs = "".join(
+    [storeX87RegTemplate % {"idx": i, "mode": "%(mode)s"} for i in range(8)]
+) + "".join(
+    [storeXMMRegTemplate % {"idx": i, "mode": "%(mode)s"} for i in range(16)]
+)
+
+fxsaveCommonTemplate = (
+    """
+    rdval t1, fcw
+    st t1, seg, %(mode)s, "DISPLACEMENT + 0", dataSize=2
+
+    # FSW includes TOP when read
+    rdval t1, fsw
+    st t1, seg, %(mode)s, "DISPLACEMENT + 2", dataSize=2
+
+    # FTW
+    rdxftw t1
+    st t1, seg, %(mode)s, "DISPLACEMENT + 4", dataSize=1
+
+    rdval t1, ctrlRegIdx("misc_reg::Fop")
+    st t1, seg, %(mode)s, "DISPLACEMENT + 6", dataSize=2
+
+    rdval t1, ctrlRegIdx("misc_reg::Mxcsr")
+    st t1, seg, %(mode)s, "DISPLACEMENT + 16 + 8", dataSize=4
+
+    # MXCSR_MASK, software assumes the default (0xFFBF) if 0.
+    limm t1, 0xFFFF
+    st t1, seg, %(mode)s, "DISPLACEMENT + 16 + 12", dataSize=4
+"""
+    + storeAllDataRegs
+)
+
+fxsave32Template = (
+    """
+    rdval t1, ctrlRegIdx("misc_reg::Fioff")
+    st t1, seg, %(mode)s, "DISPLACEMENT + 8", dataSize=4
+
+    rdval t1, ctrlRegIdx("misc_reg::Fiseg")
+    st t1, seg, %(mode)s, "DISPLACEMENT + 12", dataSize=2
+
+    rdval t1, ctrlRegIdx("misc_reg::Fooff")
+    st t1, seg, %(mode)s, "DISPLACEMENT + 16 + 0", dataSize=4
+
+    rdval t1, ctrlRegIdx("misc_reg::Foseg")
+    st t1, seg, %(mode)s, "DISPLACEMENT + 16 + 4", dataSize=2
+"""
+    + fxsaveCommonTemplate
+)
+
+fxsave64Template = (
+    """
+    rdval t1, ctrlRegIdx("misc_reg::Fioff")
+    st t1, seg, %(mode)s, "DISPLACEMENT + 8", dataSize=8
+
+    rdval t1, ctrlRegIdx("misc_reg::Fooff")
+    st t1, seg, %(mode)s, "DISPLACEMENT + 16 + 0", dataSize=8
+"""
+    + fxsaveCommonTemplate
+)
+
+fxrstorCommonTemplate = (
+    """
+    ld t1, seg, %(mode)s, "DISPLACEMENT + 0", dataSize=2
+    wrval fcw, t1
+
+    # FSW includes TOP when read
+    ld t1, seg, %(mode)s, "DISPLACEMENT + 2", dataSize=2
+    wrval fsw, t1
+
+    # FTW
+    ld t1, seg, %(mode)s, "DISPLACEMENT + 4", dataSize=1
+    wrxftw t1
+
+    ld t1, seg, %(mode)s, "DISPLACEMENT + 6", dataSize=2
+    wrval ctrlRegIdx("misc_reg::Fop"), t1
+
+    ld t1, seg, %(mode)s, "DISPLACEMENT + 16 + 8", dataSize=4
+    wrval ctrlRegIdx("misc_reg::Mxcsr"), t1
+"""
+    + loadAllDataRegs
+)
+
+fxrstor32Template = (
+    """
+    ld t1, seg, %(mode)s, "DISPLACEMENT + 8", dataSize=4
+    wrval ctrlRegIdx("misc_reg::Fioff"), t1
+
+    ld t1, seg, %(mode)s, "DISPLACEMENT + 12", dataSize=2
+    wrval ctrlRegIdx("misc_reg::Fiseg"), t1
+
+    ld t1, seg, %(mode)s, "DISPLACEMENT + 16 + 0", dataSize=4
+    wrval ctrlRegIdx("misc_reg::Fooff"), t1
+
+    ld t1, seg, %(mode)s, "DISPLACEMENT + 16 + 4", dataSize=2
+    wrval ctrlRegIdx("misc_reg::Foseg"), t1
+"""
+    + fxrstorCommonTemplate
+)
+
+fxrstor64Template = (
+    """
+    limm t2, 0, dataSize=8
+
+    ld t1, seg, %(mode)s, "DISPLACEMENT + 8", dataSize=8
+    wrval ctrlRegIdx("misc_reg::Fioff"), t1
+    wrval ctrlRegIdx("misc_reg::Fiseg"), t2
+
+    ld t1, seg, %(mode)s, "DISPLACEMENT + 16 + 0", dataSize=8
+    wrval ctrlRegIdx("misc_reg::Fooff"), t1
+    wrval ctrlRegIdx("misc_reg::Foseg"), t2
+"""
+    + fxrstorCommonTemplate
+)
+
+microcode = (
+    """
+def macroop FXSAVE_M {
+"""
+    + fxsave32Template % {"mode": "sib"}
+    + """
+};
+
+def macroop FXSAVE_P {
+    rdip t7
+"""
+    + fxsave32Template % {"mode": "riprel"}
+    + """
+};
+
+def macroop FXSAVE64_M {
+"""
+    + fxsave64Template % {"mode": "sib"}
+    + """
+};
+
+def macroop FXSAVE64_P {
+    rdip t7
+"""
+    + fxsave64Template % {"mode": "riprel"}
+    + """
+};
+
+def macroop FXRSTOR_M {
+"""
+    + fxrstor32Template % {"mode": "sib"}
+    + """
+};
+
+def macroop FXRSTOR_P {
+    rdip t7
+"""
+    + fxrstor32Template % {"mode": "riprel"}
+    + """
+};
+
+def macroop FXRSTOR64_M {
+"""
+    + fxrstor64Template % {"mode": "sib"}
+    + """
+};
+
+def macroop FXRSTOR64_P {
+    rdip t7
+"""
+    + fxrstor64Template % {"mode": "riprel"}
+    + """
+};
+"""
+)

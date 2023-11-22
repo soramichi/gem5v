@@ -1,4 +1,6 @@
 /*
+ * Copyright 2015 LabWare
+ * Copyright 2014 Google, Inc.
  * Copyright (c) 2007 The Hewlett-Packard Development Company
  * All rights reserved.
  *
@@ -33,50 +35,207 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * Authors: Gabe Black
  */
+
+#include "arch/x86/remote_gdb.hh"
 
 #include <sys/signal.h>
 #include <unistd.h>
 
 #include <string>
 
-#include "arch/x86/remote_gdb.hh"
-#include "arch/vtophys.hh"
+#include "arch/x86/mmu.hh"
+#include "arch/x86/pagetable_walker.hh"
+#include "arch/x86/process.hh"
+#include "arch/x86/regs/int.hh"
+#include "arch/x86/regs/misc.hh"
+#include "base/loader/object_file.hh"
+#include "base/logging.hh"
 #include "base/remote_gdb.hh"
 #include "base/socket.hh"
 #include "base/trace.hh"
+#include "cpu/base.hh"
 #include "cpu/thread_context.hh"
+#include "debug/GDBAcc.hh"
+#include "mem/page_table.hh"
+#include "sim/full_system.hh"
+#include "sim/workload.hh"
 
-using namespace std;
+namespace gem5
+{
+
 using namespace X86ISA;
 
-RemoteGDB::RemoteGDB(System *_system, ThreadContext *c)
-    : BaseRemoteGDB(_system, c, NumGDBRegs)
+RemoteGDB::RemoteGDB(System *_system, ListenSocketConfig _listen_config) :
+    BaseRemoteGDB(_system, _listen_config),
+    regCache32(this), regCache64(this)
 {}
 
-bool RemoteGDB::acc(Addr va, size_t len)
+bool
+RemoteGDB::acc(Addr va, size_t len)
 {
-    panic("Remote gdb acc not implemented in x86!\n");
+    if (FullSystem) {
+        Walker *walker = dynamic_cast<MMU *>(
+            context()->getMMUPtr())->getDataWalker();
+        unsigned logBytes;
+        Fault fault = walker->startFunctional(context(), va, logBytes,
+                                              BaseMMU::Read);
+        if (fault != NoFault)
+            return false;
+
+        Addr endVa = va + len - 1;
+        if ((va & ~mask(logBytes)) == (endVa & ~mask(logBytes)))
+            return true;
+
+        fault = walker->startFunctional(context(), endVa, logBytes,
+                                        BaseMMU::Read);
+        return fault == NoFault;
+    } else {
+        return context()->getProcessPtr()->pTable->lookup(va) != nullptr;
+    }
 }
 
-void RemoteGDB::getregs()
+BaseGdbRegCache*
+RemoteGDB::gdbRegs()
 {
-    panic("Remote gdb getregs not implemented in x86!\n");
+    // First, try to figure out which type of register cache to return based
+    // on the architecture reported by the workload.
+    if (system()->workload) {
+        auto arch = system()->workload->getArch();
+        if (arch == loader::X86_64) {
+            return &regCache64;
+        } else if (arch == loader::I386) {
+            return &regCache32;
+        } else if (arch != loader::UnknownArch) {
+            panic("Unrecognized workload arch %s.",
+                    loader::archToString(arch));
+        }
+    }
+
+    // If that didn't work, decide based on the current mode of the context.
+    HandyM5Reg m5reg = context()->readMiscRegNoEffect(misc_reg::M5Reg);
+    if (m5reg.submode == SixtyFourBitMode)
+        return &regCache64;
+    else
+        return &regCache32;
 }
 
-void RemoteGDB::setregs()
+
+
+void
+RemoteGDB::AMD64GdbRegCache::getRegs(ThreadContext *context)
 {
-    panic("Remote gdb setregs not implemented in x86!\n");
+    DPRINTF(GDBAcc, "getRegs in remotegdb \n");
+    r.rax = context->getReg(int_reg::Rax);
+    r.rbx = context->getReg(int_reg::Rbx);
+    r.rcx = context->getReg(int_reg::Rcx);
+    r.rdx = context->getReg(int_reg::Rdx);
+    r.rsi = context->getReg(int_reg::Rsi);
+    r.rdi = context->getReg(int_reg::Rdi);
+    r.rbp = context->getReg(int_reg::Rbp);
+    r.rsp = context->getReg(int_reg::Rsp);
+    r.r8 = context->getReg(int_reg::R8);
+    r.r9 = context->getReg(int_reg::R9);
+    r.r10 = context->getReg(int_reg::R10);
+    r.r11 = context->getReg(int_reg::R11);
+    r.r12 = context->getReg(int_reg::R12);
+    r.r13 = context->getReg(int_reg::R13);
+    r.r14 = context->getReg(int_reg::R14);
+    r.r15 = context->getReg(int_reg::R15);
+    r.rip = context->pcState().instAddr();
+    r.eflags = context->readMiscRegNoEffect(misc_reg::Rflags);
+    r.cs = context->readMiscRegNoEffect(misc_reg::Cs);
+    r.ss = context->readMiscRegNoEffect(misc_reg::Ss);
+    r.ds = context->readMiscRegNoEffect(misc_reg::Ds);
+    r.es = context->readMiscRegNoEffect(misc_reg::Es);
+    r.fs = context->readMiscRegNoEffect(misc_reg::Fs);
+    r.gs = context->readMiscRegNoEffect(misc_reg::Gs);
 }
 
-void RemoteGDB::clearSingleStep()
+void
+RemoteGDB::X86GdbRegCache::getRegs(ThreadContext *context)
 {
-    panic("Remote gdb clearSingleStep not implemented in x86!\n");
+    DPRINTF(GDBAcc, "getRegs in remotegdb \n");
+    r.eax = context->getReg(int_reg::Rax);
+    r.ecx = context->getReg(int_reg::Rcx);
+    r.edx = context->getReg(int_reg::Rdx);
+    r.ebx = context->getReg(int_reg::Rbx);
+    r.esp = context->getReg(int_reg::Rsp);
+    r.ebp = context->getReg(int_reg::Rbp);
+    r.esi = context->getReg(int_reg::Rsi);
+    r.edi = context->getReg(int_reg::Rdi);
+    r.eip = context->pcState().instAddr();
+    r.eflags = context->readMiscRegNoEffect(misc_reg::Rflags);
+    r.cs = context->readMiscRegNoEffect(misc_reg::Cs);
+    r.ss = context->readMiscRegNoEffect(misc_reg::Ss);
+    r.ds = context->readMiscRegNoEffect(misc_reg::Ds);
+    r.es = context->readMiscRegNoEffect(misc_reg::Es);
+    r.fs = context->readMiscRegNoEffect(misc_reg::Fs);
+    r.gs = context->readMiscRegNoEffect(misc_reg::Gs);
 }
 
-void RemoteGDB::setSingleStep()
+void
+RemoteGDB::AMD64GdbRegCache::setRegs(ThreadContext *context) const
 {
-    panic("Remoge gdb setSingleStep not implemented in x86!\n");
+    DPRINTF(GDBAcc, "setRegs in remotegdb \n");
+    context->setReg(int_reg::Rax, r.rax);
+    context->setReg(int_reg::Rbx, r.rbx);
+    context->setReg(int_reg::Rcx, r.rcx);
+    context->setReg(int_reg::Rdx, r.rdx);
+    context->setReg(int_reg::Rsi, r.rsi);
+    context->setReg(int_reg::Rdi, r.rdi);
+    context->setReg(int_reg::Rbp, r.rbp);
+    context->setReg(int_reg::Rsp, r.rsp);
+    context->setReg(int_reg::R8, r.r8);
+    context->setReg(int_reg::R9, r.r9);
+    context->setReg(int_reg::R10, r.r10);
+    context->setReg(int_reg::R11, r.r11);
+    context->setReg(int_reg::R12, r.r12);
+    context->setReg(int_reg::R13, r.r13);
+    context->setReg(int_reg::R14, r.r14);
+    context->setReg(int_reg::R15, r.r15);
+    context->pcState(r.rip);
+    context->setMiscReg(misc_reg::Rflags, r.eflags);
+    if (r.cs != context->readMiscRegNoEffect(misc_reg::Cs))
+        warn("Remote gdb: Ignoring update to CS.\n");
+    if (r.ss != context->readMiscRegNoEffect(misc_reg::Ss))
+        warn("Remote gdb: Ignoring update to SS.\n");
+    if (r.ds != context->readMiscRegNoEffect(misc_reg::Ds))
+        warn("Remote gdb: Ignoring update to DS.\n");
+    if (r.es != context->readMiscRegNoEffect(misc_reg::Es))
+        warn("Remote gdb: Ignoring update to ES.\n");
+    if (r.fs != context->readMiscRegNoEffect(misc_reg::Fs))
+        warn("Remote gdb: Ignoring update to FS.\n");
+    if (r.gs != context->readMiscRegNoEffect(misc_reg::Gs))
+        warn("Remote gdb: Ignoring update to GS.\n");
 }
+
+void
+RemoteGDB::X86GdbRegCache::setRegs(ThreadContext *context) const
+{
+    DPRINTF(GDBAcc, "setRegs in remotegdb \n");
+    context->setReg(int_reg::Rax, r.eax);
+    context->setReg(int_reg::Rcx, r.ecx);
+    context->setReg(int_reg::Rdx, r.edx);
+    context->setReg(int_reg::Rbx, r.ebx);
+    context->setReg(int_reg::Rsp, r.esp);
+    context->setReg(int_reg::Rbp, r.ebp);
+    context->setReg(int_reg::Rsi, r.esi);
+    context->setReg(int_reg::Rdi, r.edi);
+    context->pcState(r.eip);
+    context->setMiscReg(misc_reg::Rflags, r.eflags);
+    if (r.cs != context->readMiscRegNoEffect(misc_reg::Cs))
+        warn("Remote gdb: Ignoring update to CS.\n");
+    if (r.ss != context->readMiscRegNoEffect(misc_reg::Ss))
+        warn("Remote gdb: Ignoring update to SS.\n");
+    if (r.ds != context->readMiscRegNoEffect(misc_reg::Ds))
+        warn("Remote gdb: Ignoring update to DS.\n");
+    if (r.es != context->readMiscRegNoEffect(misc_reg::Es))
+        warn("Remote gdb: Ignoring update to ES.\n");
+    if (r.fs != context->readMiscRegNoEffect(misc_reg::Fs))
+        warn("Remote gdb: Ignoring update to FS.\n");
+    if (r.gs != context->readMiscRegNoEffect(misc_reg::Gs))
+        warn("Remote gdb: Ignoring update to GS.\n");
+}
+
+} // namespace gem5

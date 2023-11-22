@@ -24,8 +24,6 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * Authors: Ali Saidi
  */
 
 /** @file
@@ -41,6 +39,9 @@
 #include "dev/io_device.hh"
 #include "params/DumbTOD.hh"
 
+namespace gem5
+{
+
 /**
  * DumbTOD simply returns some idea of time when read.  Until we finish with
  * legion it starts with the start time and increments itself by 1000 each time.
@@ -51,32 +52,16 @@ class DumbTOD : public BasicPioDevice
     uint64_t todTime;
 
   public:
-    typedef DumbTODParams Params;
-    DumbTOD(const Params *p);
+    using Params = DumbTODParams;
+    DumbTOD(const Params &p);
 
-    const Params *
-    params() const
-    {
-        return dynamic_cast<const Params *>(_params);
-    }
+    Tick read(PacketPtr pkt) override;
+    Tick write(PacketPtr pkt) override;
 
-    virtual Tick read(PacketPtr pkt);
-    virtual Tick write(PacketPtr pkt);
-
-    /**
-     * Serialize this object to the given output stream.
-     * @param os The stream to serialize to.
-     */
-    virtual void serialize(std::ostream &os);
-
-    /**
-     * Reconstruct the state of this object from a checkpoint.
-     * @param cp The checkpoint use.
-     * @param section The section name of this object
-     */
-    virtual void unserialize(Checkpoint *cp, const std::string &section);
-
-
+    void serialize(CheckpointOut &cp) const override;
+    void unserialize(CheckpointIn &cp) override;
 };
+
+} // namespace gem5
 
 #endif // __DEV_BADDEV_HH__

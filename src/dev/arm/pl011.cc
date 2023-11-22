@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010 ARM Limited
+ * Copyright (c) 2010, 2015 ARM Limited
  * All rights reserved
  *
  * The license below extends only to copyright in the software and shall
@@ -36,36 +36,40 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * Authors: Ali Saidi
  */
+
+#include "dev/arm/pl011.hh"
 
 #include "base/trace.hh"
 #include "debug/Checkpoint.hh"
 #include "debug/Uart.hh"
 #include "dev/arm/amba_device.hh"
-#include "dev/arm/gic.hh"
-#include "dev/arm/pl011.hh"
-#include "dev/terminal.hh"
+#include "dev/arm/base_gic.hh"
 #include "mem/packet.hh"
 #include "mem/packet_access.hh"
+#include "params/Pl011.hh"
 #include "sim/sim_exit.hh"
 
-Pl011::Pl011(const Params *p)
-    : Uart(p), control(0x300), fbrd(0), ibrd(0), lcrh(0), ifls(0x12), imsc(0),
-      rawInt(0), maskInt(0), intNum(p->int_num), gic(p->gic),
-      endOnEOT(p->end_on_eot), intDelay(p->int_delay), intEvent(this)
+namespace gem5
 {
-    pioSize = 0xfff;
+
+Pl011::Pl011(const Pl011Params &p)
+    : Uart(p, 0x1000),
+      intEvent([this]{ generateInterrupt(); }, name()),
+      control(0x300), fbrd(0), ibrd(0), lcrh(0), ifls(0x12),
+      imsc(0), rawInt(0),
+      endOnEOT(p.end_on_eot), interrupt(p.interrupt->get()),
+      intDelay(p.int_delay)
+{
 }
 
 Tick
 Pl011::read(PacketPtr pkt)
 {
     assert(pkt->getAddr() >= pioAddr && pkt->getAddr() < pioAddr + pioSize);
+    assert(pkt->getSize() <= 4);
 
     Addr daddr = pkt->getAddr() - pioAddr;
-    pkt->allocate();
 
     DPRINTF(Uart, " read register %#x size=%d\n", daddr, pkt->getSize());
 
@@ -77,17 +81,32 @@ Pl011::read(PacketPtr pkt)
     switch(daddr) {
       case UART_DR:
         data = 0;
-        if (term->dataAvailable())
-            data = term->in();
+        if (device->dataAvailable()) {
+            data = device->readData();
+            // Since we don't simulate a FIFO for incoming data, we
+            // assume it's empty and clear RXINTR and RTINTR.
+            clearInterrupts(UART_RXINTR | UART_RTINTR);
+            if (device->dataAvailable()) {
+                DPRINTF(Uart, "Re-raising interrupt due to more data "
+                        "after UART_DR read\n");
+                dataAvailable();
+            }
+        }
+        break;
+      case UART_RSR:
+        data = 0x0; // We never have errors
         break;
       case UART_FR:
-        // For now we're infintely fast, so TX is never full, always empty,
-        // always clear to send
-        data = UART_FR_TXFE | UART_FR_CTS;
-        if (!term->dataAvailable())
-            data |= UART_FR_RXFE;
-        DPRINTF(Uart, "Reading FR register as %#x rawInt=0x%x imsc=0x%x maskInt=0x%x\n",
-                data, rawInt, imsc, maskInt);
+        data =
+            UART_FR_CTS | // Clear To Send
+            // Given we do not simulate a FIFO we are either empty or full.
+            (!device->dataAvailable() ? UART_FR_RXFE : UART_FR_RXFF) |
+            UART_FR_TXFE; // TX FIFO empty
+
+        DPRINTF(Uart,
+                "Reading FR register as %#x rawInt=0x%x "
+                "imsc=0x%x maskInt=0x%x\n",
+                data, rawInt, imsc, maskInt());
         break;
       case UART_CR:
         data = control;
@@ -112,13 +131,17 @@ Pl011::read(PacketPtr pkt)
         DPRINTF(Uart, "Reading Raw Int status as 0x%x\n", rawInt);
         break;
       case UART_MIS:
-        DPRINTF(Uart, "Reading Masked Int status as 0x%x\n", rawInt);
-        data = maskInt;
+        DPRINTF(Uart, "Reading Masked Int status as 0x%x\n", maskInt());
+        data = maskInt();
+        break;
+      case UART_DMACR:
+        warn("PL011: DMA not supported\n");
+        data = 0x0; // DMA never enabled
         break;
       default:
-        if (AmbaDev::readId(pkt, AMBA_ID, pioAddr)) {
+        if (readId(pkt, AMBA_ID, pioAddr)) {
             // Hack for variable size accesses
-            data = pkt->get<uint32_t>();
+            data = pkt->getUintX(ByteOrder::little);
             break;
         }
 
@@ -126,22 +149,7 @@ Pl011::read(PacketPtr pkt)
         break;
     }
 
-    switch(pkt->getSize()) {
-      case 1:
-        pkt->set<uint8_t>(data);
-        break;
-      case 2:
-        pkt->set<uint16_t>(data);
-        break;
-      case 4:
-        pkt->set<uint32_t>(data);
-        break;
-      default:
-        panic("Uart read size too big?\n");
-        break;
-    }
-
-
+    pkt->setUintX(data, ByteOrder::little);
     pkt->makeAtomicResponse();
     return pioDelay;
 }
@@ -151,48 +159,31 @@ Pl011::write(PacketPtr pkt)
 {
 
     assert(pkt->getAddr() >= pioAddr && pkt->getAddr() < pioAddr + pioSize);
+    assert(pkt->getSize() <= 4);
 
     Addr daddr = pkt->getAddr() - pioAddr;
 
     DPRINTF(Uart, " write register %#x value %#x size=%d\n", daddr,
-            pkt->get<uint8_t>(), pkt->getSize());
+            pkt->getLE<uint8_t>(), pkt->getSize());
 
     // use a temporary data since the uart registers are read/written with
     // different size operations
     //
-    uint32_t data = 0;
-
-    switch(pkt->getSize()) {
-      case 1:
-        data = pkt->get<uint8_t>();
-        break;
-      case 2:
-        data = pkt->get<uint16_t>();
-        break;
-      case 4:
-        data = pkt->get<uint32_t>();
-        break;
-      default:
-        panic("Uart write size too big?\n");
-        break;
-    }
-
+    const uint32_t data = pkt->getUintX(ByteOrder::little);
 
     switch (daddr) {
         case UART_DR:
           if ((data & 0xFF) == 0x04 && endOnEOT)
             exitSimLoop("UART received EOT", 0);
 
-        term->out(data & 0xFF);
-
-        //raw interrupt is set regardless of imsc.txim
-        rawInt.txim = 1;
-        if (imsc.txim) {
-            DPRINTF(Uart, "TX int enabled, scheduling interruptt\n");
-            if (!intEvent.scheduled())
-                schedule(intEvent, curTick() + intDelay);
-        }
-
+        device->writeData(data & 0xFF);
+        // We're supposed to clear TXINTR when this register is
+        // written to, however. since we're also infinitely fast, we
+        // need to immediately raise it again.
+        clearInterrupts(UART_TXINTR);
+        raiseInterrupts(UART_TXINTR);
+        break;
+      case UART_ECR: // clears errors, ignore
         break;
       case UART_CR:
         control = data;
@@ -210,31 +201,26 @@ Pl011::write(PacketPtr pkt)
         ifls = data;
         break;
       case UART_IMSC:
-        imsc = data;
-
-        if (imsc.rimim || imsc.ctsmim || imsc.dcdmim || imsc.dsrmim
-             || imsc.feim || imsc.peim || imsc.beim || imsc.oeim || imsc.rsvd)
-            panic("Unknown interrupt enabled\n");
-
-        if (imsc.txim) {
-            DPRINTF(Uart, "Writing to IMSC: TX int enabled, scheduling interruptt\n");
-            rawInt.txim = 1;
-            if (!intEvent.scheduled())
-                schedule(intEvent, curTick() + intDelay);
-        }
-
+        DPRINTF(Uart, "Setting interrupt mask 0x%x\n", data);
+        setInterruptMask(data);
         break;
 
       case UART_ICR:
         DPRINTF(Uart, "Clearing interrupts 0x%x\n", data);
-        rawInt = rawInt & ~data;
-        maskInt = rawInt & imsc;
-
-        DPRINTF(Uart, " -- Masked interrupts 0x%x\n", maskInt);
-
-        if (!maskInt)
-            gic->clearInt(intNum);
-
+        clearInterrupts(data);
+        if (device->dataAvailable()) {
+            DPRINTF(Uart, "Re-raising interrupt due to more data after "
+                    "UART_ICR write\n");
+            dataAvailable();
+        }
+        break;
+      case UART_DMACR:
+        // DMA is not supported, so panic if anyome tries to enable it.
+        // Bits 0, 1, 2 enables DMA on RX, TX, ERR respectively, others res0.
+        if (data & 0x7) {
+            panic("Tried to enable DMA on PL011\n");
+        }
+        warn("PL011: DMA not supported\n");
         break;
       default:
         panic("Tried to write PL011 at offset %#x that doesn't exist\n", daddr);
@@ -249,33 +235,42 @@ Pl011::dataAvailable()
 {
     /*@todo ignore the fifo, just say we have data now
      * We might want to fix this, or we might not care */
-    rawInt.rxim = 1;
-    rawInt.rtim = 1;
-
     DPRINTF(Uart, "Data available, scheduling interrupt\n");
-
-    if (!intEvent.scheduled())
-        schedule(intEvent, curTick() + intDelay);
+    raiseInterrupts(UART_RXINTR | UART_RTINTR);
 }
 
 void
 Pl011::generateInterrupt()
 {
     DPRINTF(Uart, "Generate Interrupt: imsc=0x%x rawInt=0x%x maskInt=0x%x\n",
-            imsc, rawInt, maskInt);
-    maskInt = imsc & rawInt;
+            imsc, rawInt, maskInt());
 
-    if (maskInt.rxim || maskInt.rtim || maskInt.txim) {
-        gic->sendInt(intNum);
+    if (maskInt()) {
+        interrupt->raise();
         DPRINTF(Uart, " -- Generated\n");
     }
+}
 
+void
+Pl011::setInterrupts(uint16_t ints, uint16_t mask)
+{
+    const bool old_ints(!!maskInt());
+
+    imsc = mask;
+    rawInt = ints;
+
+    if (!old_ints && maskInt()) {
+        if (!intEvent.scheduled())
+            schedule(intEvent, curTick() + intDelay);
+    } else if (old_ints && !maskInt()) {
+        interrupt->clear();
+    }
 }
 
 
 
 void
-Pl011::serialize(std::ostream &os)
+Pl011::serialize(CheckpointOut &cp) const
 {
     DPRINTF(Checkpoint, "Serializing Arm PL011\n");
     SERIALIZE_SCALAR(control);
@@ -284,21 +279,13 @@ Pl011::serialize(std::ostream &os)
     SERIALIZE_SCALAR(lcrh);
     SERIALIZE_SCALAR(ifls);
 
-    uint16_t imsc_serial = imsc;
-    SERIALIZE_SCALAR(imsc_serial);
-
-    uint16_t rawInt_serial = rawInt;
-    SERIALIZE_SCALAR(rawInt_serial);
-
-    uint16_t maskInt_serial = maskInt;
-    SERIALIZE_SCALAR(maskInt_serial);
-
-    SERIALIZE_SCALAR(endOnEOT);
-    SERIALIZE_SCALAR(intDelay);
+    // Preserve backwards compatibility by giving these silly names.
+    paramOut(cp, "imsc_serial", imsc);
+    paramOut(cp, "rawInt_serial", rawInt);
 }
 
 void
-Pl011::unserialize(Checkpoint *cp, const std::string &section)
+Pl011::unserialize(CheckpointIn &cp)
 {
     DPRINTF(Checkpoint, "Unserializing Arm PL011\n");
 
@@ -308,24 +295,9 @@ Pl011::unserialize(Checkpoint *cp, const std::string &section)
     UNSERIALIZE_SCALAR(lcrh);
     UNSERIALIZE_SCALAR(ifls);
 
-    uint16_t imsc_serial;
-    UNSERIALIZE_SCALAR(imsc_serial);
-    imsc = imsc_serial;
-
-    uint16_t rawInt_serial;
-    UNSERIALIZE_SCALAR(rawInt_serial);
-    rawInt = rawInt_serial;
-
-    uint16_t maskInt_serial;
-    UNSERIALIZE_SCALAR(maskInt_serial);
-    maskInt = maskInt_serial;
-
-    UNSERIALIZE_SCALAR(endOnEOT);
-    UNSERIALIZE_SCALAR(intDelay);
+    // Preserve backwards compatibility by giving these silly names.
+    paramIn(cp, "imsc_serial", imsc);
+    paramIn(cp, "rawInt_serial", rawInt);
 }
 
-Pl011 *
-Pl011Params::create()
-{
-    return new Pl011(this);
-}
+} // namespace gem5

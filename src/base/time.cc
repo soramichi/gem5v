@@ -24,21 +24,22 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * Authors: Nathan Binkert
  */
+
+#include "base/time.hh"
 
 #include <cstdlib>
 #include <ctime>
 #include <iostream>
 #include <sstream>
 
-#include "base/time.hh"
+#include "base/logging.hh"
 #include "config/use_posix_clock.hh"
 #include "sim/core.hh"
 #include "sim/serialize.hh"
 
-using namespace std;
+namespace gem5
+{
 
 void
 Time::_set(bool monotonic)
@@ -55,18 +56,21 @@ Time::_set(bool monotonic)
 void
 Time::setTick(Tick ticks)
 {
-    uint64_t nsecs = ticks / SimClock::Int::ns;
-    set(nsecs / NSEC_PER_SEC, nsecs % NSEC_PER_SEC);
+    uint64_t secs = ticks / sim_clock::Frequency;
+    ticks -= secs * sim_clock::Frequency;
+    uint64_t nsecs = static_cast<uint64_t>(ticks * sim_clock::as_float::GHz);
+    set(secs, nsecs);
 }
 
 Tick
 Time::getTick() const
 {
-    return (nsec() + sec() * NSEC_PER_SEC) * SimClock::Int::ns;
+    return sec() * sim_clock::Frequency +
+        static_cast<uint64_t>(nsec() * sim_clock::as_float::ns);
 }
 
-string
-Time::date(const string &format) const
+std::string
+Time::date(const std::string &format) const
 {
     time_t sec = this->sec();
     char buf[256];
@@ -86,7 +90,7 @@ Time::date(const string &format) const
     return buf;
 }
 
-string
+std::string
 Time::time() const
 {
     double time = double(*this);
@@ -95,7 +99,7 @@ Time::time() const
     double mins = fmod(all_mins, 60.0);
     double hours = floor(all_mins / 60.0);
 
-    stringstream str;
+    std::stringstream str;
 
     if (hours > 0.0) {
         if (hours < 10.0)
@@ -117,20 +121,19 @@ Time::time() const
 }
 
 void
-Time::serialize(const std::string &base, ostream &os)
+Time::serialize(const std::string &base, CheckpointOut &cp) const
 {
-    paramOut(os, base + ".sec", sec());
-    paramOut(os, base + ".nsec", nsec());
+    paramOut(cp, base + ".sec", sec());
+    paramOut(cp, base + ".nsec", nsec());
 }
 
 void
-Time::unserialize(const std::string &base, Checkpoint *cp,
-                  const string &section)
+Time::unserialize(const std::string &base, CheckpointIn &cp)
 {
     time_t secs;
     time_t nsecs;
-    paramIn(cp, section, base + ".sec", secs);
-    paramIn(cp, section, base + ".nsec", nsecs);
+    paramIn(cp, base + ".sec", secs);
+    paramIn(cp, base + ".nsec", nsecs);
     sec(secs);
     nsec(nsecs);
 }
@@ -150,18 +153,33 @@ sleep(const Time &time)
 time_t
 mkutctime(struct tm *time)
 {
-    time_t ret;
-    char *tz;
+    // get the current timezone
+    char *tz = getenv("TZ");
 
-    tz = getenv("TZ");
+    // copy the string as the pointer gets invalidated when updating
+    // the environment
+    if (tz) {
+        tz = strdup(tz);
+        if (!tz) {
+            fatal("Failed to reserve memory for UTC time conversion\n");
+        }
+    }
+
+    // change to UTC and get the time
     setenv("TZ", "", 1);
     tzset();
-    ret = mktime(time);
-    if (tz)
+    time_t ret = mktime(time);
+
+    // restore the timezone again
+    if (tz) {
         setenv("TZ", tz, 1);
-    else
+        free(tz);
+    } else {
         unsetenv("TZ");
+    }
     tzset();
+
     return ret;
 }
 
+} // namespace gem5

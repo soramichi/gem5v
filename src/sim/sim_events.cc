@@ -1,5 +1,19 @@
 /*
+ * Copyright (c) 2013 ARM Limited
+ * All rights reserved
+ *
+ * The license below extends only to copyright in the software and shall
+ * not be construed as granting a license to any other intellectual
+ * property including but not limited to intellectual property relating
+ * to a hardware implementation of the functionality of the software
+ * licensed hereunder.  You may use the software subject to the license
+ * terms below provided that you ensure that this notice is replicated
+ * unmodified and in its entirety in all distributions of the software,
+ * modified or unmodified, in source code or in binary form.
+ *
  * Copyright (c) 2002-2005 The Regents of The University of Michigan
+ * Copyright (c) 2013 Advanced Micro Devices, Inc.
+ * Copyright (c) 2013 Mark D. Hill and David A. Wood
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -24,74 +38,111 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * Authors: Nathan Binkert
  */
+
+#include "sim/sim_events.hh"
 
 #include <string>
 
 #include "base/callback.hh"
-#include "base/hostinfo.hh"
 #include "sim/eventq.hh"
-#include "sim/sim_events.hh"
 #include "sim/sim_exit.hh"
 #include "sim/stats.hh"
 
-using namespace std;
+namespace gem5
+{
 
-SimLoopExitEvent::SimLoopExitEvent(const std::string &_cause, int c, Tick r)
-    : Event(Sim_Exit_Pri, IsExitEvent), cause(_cause), code(c), repeat(r)
+GlobalSimLoopExitEvent::GlobalSimLoopExitEvent(Tick when,
+                                               const std::string &_cause,
+                                               int c, Tick r)
+    : GlobalEvent(when, Sim_Exit_Pri, IsExitEvent),
+      cause(_cause), code(c), repeat(r)
 {
 }
 
+GlobalSimLoopExitEvent::GlobalSimLoopExitEvent(const std::string &_cause,
+                                               int c, Tick r)
+    : GlobalEvent(curTick(), Minimum_Pri, IsExitEvent),
+      cause(_cause), code(c), repeat(r)
+{
+}
+
+const char *
+GlobalSimLoopExitEvent::description() const
+{
+    return "global simulation loop exit";
+}
 
 //
 // handle termination event
 //
 void
-SimLoopExitEvent::process()
+GlobalSimLoopExitEvent::process()
 {
-    // if this got scheduled on a different queue (e.g. the committed
-    // instruction queue) then make a corresponding event on the main
-    // queue.
-    if (!isFlagSet(IsMainQueue)) {
-        exitSimLoop(cause, code);
-        delete this;
-    }
-
-    // otherwise do nothing... the IsExitEvent flag takes care of
-    // exiting the simulation loop and returning this object to Python
-
-    // but if you are doing this on intervals, don't forget to make another
     if (repeat) {
-        assert(isFlagSet(IsMainQueue));
-        mainEventQueue.schedule(this, curTick() + repeat);
+        schedule(curTick() + repeat);
     }
+}
+
+void
+exitSimLoop(const std::string &message, int exit_code, Tick when, Tick repeat,
+            bool serialize)
+{
+    warn_if(serialize && (when != curTick() || repeat),
+            "exitSimLoop called with a delay and auto serialization. This is "
+            "currently unsupported.");
+
+    new GlobalSimLoopExitEvent(when + simQuantum, message, exit_code, repeat);
+}
+
+void
+exitSimLoopNow(const std::string &message, int exit_code, Tick repeat,
+               bool serialize)
+{
+    new GlobalSimLoopExitEvent(message, exit_code, repeat);
+}
+
+LocalSimLoopExitEvent::LocalSimLoopExitEvent(const std::string &_cause, int c,
+                                   Tick r)
+    : Event(Sim_Exit_Pri, IsExitEvent),
+      cause(_cause), code(c), repeat(r)
+{
+}
+
+//
+// handle termination event
+//
+void
+LocalSimLoopExitEvent::process()
+{
+    exitSimLoop(cause, 0);
 }
 
 
 const char *
-SimLoopExitEvent::description() const
+LocalSimLoopExitEvent::description() const
 {
     return "simulation loop exit";
 }
 
 void
-exitSimLoop(const std::string &message, int exit_code, Tick when, Tick repeat)
+LocalSimLoopExitEvent::serialize(CheckpointOut &cp) const
 {
-    Event *event = new SimLoopExitEvent(message, exit_code, repeat);
-    mainEventQueue.schedule(event, when);
+    Event::serialize(cp);
+
+    SERIALIZE_SCALAR(cause);
+    SERIALIZE_SCALAR(code);
+    SERIALIZE_SCALAR(repeat);
 }
 
-CountedDrainEvent::CountedDrainEvent()
-    : count(0)
-{ }
-
 void
-CountedDrainEvent::process()
+LocalSimLoopExitEvent::unserialize(CheckpointIn &cp)
 {
-    if (--count == 0)
-        exitSimLoop("Finished drain", 0);
+    Event::unserialize(cp);
+
+    UNSERIALIZE_SCALAR(cause);
+    UNSERIALIZE_SCALAR(code);
+    UNSERIALIZE_SCALAR(repeat);
 }
 
 //
@@ -122,3 +173,5 @@ CountedExitEvent::description() const
 {
     return "counted exit";
 }
+
+} // namespace gem5

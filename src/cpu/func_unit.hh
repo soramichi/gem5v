@@ -24,13 +24,12 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * Authors: Steve Raasch
  */
 
 #ifndef __CPU_FUNC_UNIT_HH__
 #define __CPU_FUNC_UNIT_HH__
 
+#include <array>
 #include <bitset>
 #include <string>
 #include <vector>
@@ -39,6 +38,25 @@
 #include "params/FUDesc.hh"
 #include "params/OpDesc.hh"
 #include "sim/sim_object.hh"
+
+namespace gem5
+{
+
+////////////////////////////////////////////////////////////////////////////
+//
+//  The SimObjects we use to get the FU information into the simulator
+//
+////////////////////////////////////////////////////////////////////////////
+
+//
+//  We use 2 objects to specify this data in the INI file:
+//    (1) OpDesc - Describes the operation class & latencies
+//                   (multiple OpDesc objects can refer to the same
+//                   operation classes)
+//    (2) FUDesc - Describes the operations available in the unit &
+//                   the number of these units
+//
+//
 
 ////////////////////////////////////////////////////////////////////////////
 //
@@ -52,11 +70,11 @@ class OpDesc : public SimObject
   public:
     OpClass opClass;
     Cycles opLat;
-    Cycles issueLat;
+    bool pipelined;
 
-    OpDesc(const OpDescParams *p)
-        : SimObject(p), opClass(p->opClass), opLat(p->opLat),
-          issueLat(p->issueLat) {};
+    OpDesc(const OpDescParams &p)
+        : SimObject(p), opClass(p.opClass), opLat(p.opLat),
+          pipelined(p.pipelined) {};
 };
 
 class FUDesc : public SimObject
@@ -65,8 +83,8 @@ class FUDesc : public SimObject
     std::vector<OpDesc *> opDescList;
     unsigned         number;
 
-    FUDesc(const FUDescParams *p)
-        : SimObject(p), opDescList(p->opList), number(p->count) {};
+    FUDesc(const FUDescParams &p)
+        : SimObject(p), opDescList(p.opList), number(p.count) {};
 };
 
 typedef std::vector<OpDesc *>::const_iterator OPDDiterator;
@@ -84,8 +102,8 @@ typedef std::vector<FUDesc *>::const_iterator FUDDiterator;
 class FuncUnit
 {
   private:
-    unsigned opLatencies[Num_OpClasses];
-    unsigned issueLatencies[Num_OpClasses];
+    std::array<unsigned, Num_OpClasses> opLatencies;
+    std::array<bool, Num_OpClasses> pipelined;
     std::bitset<Num_OpClasses> capabilityList;
 
   public:
@@ -94,13 +112,15 @@ class FuncUnit
 
     std::string name;
 
-    void addCapability(OpClass cap, unsigned oplat, unsigned issuelat);
+    void addCapability(OpClass cap, unsigned oplat, bool pipelined);
 
     bool provides(OpClass capability);
     std::bitset<Num_OpClasses> capabilities();
 
     unsigned &opLatency(OpClass capability);
-    unsigned issueLatency(OpClass capability);
+    bool isPipelined(OpClass capability);
 };
+
+} // namespace gem5
 
 #endif // __FU_POOL_HH__

@@ -1,4 +1,16 @@
 /*
+* Copyright (c) 2012, 2018, 2023 Arm Limited
+ * All rights reserved
+ *
+ * The license below extends only to copyright in the software and shall
+ * not be construed as granting a license to any other intellectual
+ * property including but not limited to intellectual property relating
+ * to a hardware implementation of the functionality of the software
+ * licensed hereunder.  You may use the software subject to the license
+ * terms below provided that you ensure that this notice is replicated
+ * unmodified and in its entirety in all distributions of the software,
+ * modified or unmodified, in source code or in binary form.
+ *
  * Copyright (c) 2007-2008 The Florida State University
  * All rights reserved.
  *
@@ -24,8 +36,6 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * Authors: Stephen Hines
  */
 
 #ifndef __ARM_PROCESS_HH__
@@ -34,30 +44,73 @@
 #include <string>
 #include <vector>
 
+#include "arch/arm/regs/int.hh"
 #include "base/loader/object_file.hh"
+#include "mem/page_table.hh"
 #include "sim/process.hh"
+#include "sim/syscall_abi.hh"
 
-class LiveProcess;
-class ObjectFile;
-class System;
+namespace gem5
+{
 
-class ArmLiveProcess : public LiveProcess
+class ArmProcess : public Process
 {
   protected:
-    ObjectFile::Arch arch;
-    ArmLiveProcess(LiveProcessParams * params, ObjectFile *objFile,
-                   ObjectFile::Arch _arch);
+    loader::Arch arch;
+    ArmProcess(const ProcessParams &params, loader::ObjectFile *objFile,
+               loader::Arch _arch);
+    template<class IntType>
+    void argsInit(int pageSize, const RegId &spId);
 
-    void initState();
+    template<class IntType>
+    IntType
+    armHwcap() const
+    {
+        return static_cast<IntType>(armHwcapImpl());
+    }
 
-  public:
-    void argsInit(int intSize, int pageSize);
+    template<class IntType>
+    IntType
+    armHwcap2() const
+    {
+        return static_cast<IntType>(armHwcapImpl2());
+    }
 
-    uint64_t getSyscallArg(ThreadContext *tc, int &i, int width);
-    ArmISA::IntReg getSyscallArg(ThreadContext *tc, int &i);
-    void setSyscallArg(ThreadContext *tc, int i, ArmISA::IntReg val);
-    void setSyscallReturn(ThreadContext *tc, SyscallReturn return_value);
+    /**
+     * AT_HWCAP is 32-bit wide on AArch64 as well so we can
+     * safely return an uint32_t */
+    virtual uint32_t armHwcapImpl() const = 0;
+    virtual uint64_t armHwcapImpl2() const = 0;
 };
 
-#endif // __ARM_PROCESS_HH__
+class ArmProcess32 : public ArmProcess
+{
+  public:
+    ArmProcess32(const ProcessParams &params, loader::ObjectFile *objFile,
+                 loader::Arch _arch);
 
+  protected:
+    void initState() override;
+
+    /** AArch32 AT_HWCAP */
+    uint32_t armHwcapImpl() const override;
+    uint64_t armHwcapImpl2() const override { return 0; }
+};
+
+class ArmProcess64 : public ArmProcess
+{
+  public:
+    ArmProcess64(const ProcessParams &params, loader::ObjectFile *objFile,
+                 loader::Arch _arch);
+
+  protected:
+    void initState() override;
+
+    /** AArch64 AT_HWCAP */
+    uint32_t armHwcapImpl() const override;
+    uint64_t armHwcapImpl2() const override;
+};
+
+} // namespace gem5
+
+#endif // __ARM_PROCESS_HH__

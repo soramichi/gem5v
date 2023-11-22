@@ -1,5 +1,19 @@
 /*
+ * Copyright (c) 2013 ARM Limited
+ * All rights reserved
+ *
+ * The license below extends only to copyright in the software and shall
+ * not be construed as granting a license to any other intellectual
+ * property including but not limited to intellectual property relating
+ * to a hardware implementation of the functionality of the software
+ * licensed hereunder.  You may use the software subject to the license
+ * terms below provided that you ensure that this notice is replicated
+ * unmodified and in its entirety in all distributions of the software,
+ * modified or unmodified, in source code or in binary form.
+ *
  * Copyright (c) 2002-2005 The Regents of The University of Michigan
+ * Copyright (c) 2013 Advanced Micro Devices, Inc.
+ * Copyright (c) 2013 Mark D. Hill and David A. Wood
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -24,19 +38,21 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * Authors: Nathan Binkert
  */
 
 #ifndef __SIM_SIM_EVENTS_HH__
 #define __SIM_SIM_EVENTS_HH__
 
-#include "sim/eventq.hh"
+#include "sim/global_event.hh"
+#include "sim/serialize.hh"
+
+namespace gem5
+{
 
 //
 // Event to terminate simulation at a particular cycle/instruction
 //
-class SimLoopExitEvent : public Event
+class GlobalSimLoopExitEvent : public GlobalEvent
 {
   protected:
     // string explaining why we're terminating
@@ -45,30 +61,42 @@ class SimLoopExitEvent : public Event
     Tick repeat;
 
   public:
-    SimLoopExitEvent(const std::string &_cause, int c, Tick repeat = 0);
+    GlobalSimLoopExitEvent(Tick when, const std::string &_cause, int c,
+                           Tick repeat = 0);
+    GlobalSimLoopExitEvent(const std::string &_cause, int c, Tick repeat = 0);
 
-    std::string getCause() { return cause; }
-    int getCode() { return code; }
+    const std::string getCause() const { return cause; }
+    int getCode() const { return code; }
 
-    void process();     // process event
-
+    virtual void process();// process event
+    virtual void clean(){};//cleaning event
+    ~GlobalSimLoopExitEvent (){
+      DPRINTF(Event,"GlobalSimLoopExitEvent destructed\n");
+    };
     virtual const char *description() const;
 };
 
-class CountedDrainEvent : public Event
+class LocalSimLoopExitEvent : public Event
 {
-  private:
-    // Count of how many objects have not yet drained
-    int count;
+  protected:
+    // string explaining why we're terminating
+    std::string cause;
+    int code;
+    Tick repeat;
 
   public:
-    CountedDrainEvent();
+    LocalSimLoopExitEvent();
+    LocalSimLoopExitEvent(const std::string &_cause, int c, Tick repeat = 0);
 
-    void process();
+    const std::string getCause() const { return cause; }
+    int getCode() const { return code; }
 
-    void setCount(int _count) { count = _count; }
+    void process() override;     // process event
 
-    int getCount() { return count; }
+    const char *description() const override;
+
+    void serialize(CheckpointOut &cp) const override;
+    void unserialize(CheckpointIn &cp) override;
 };
 
 //
@@ -85,10 +113,11 @@ class CountedExitEvent : public Event
   public:
     CountedExitEvent(const std::string &_cause, int &_downCounter);
 
-    void process();     // process event
+    void process() override;     // process event
 
-    virtual const char *description() const;
+    const char *description() const override;
 };
 
+} // namespace gem5
 
 #endif  // __SIM_SIM_EVENTS_HH__

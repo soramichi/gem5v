@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010 ARM Limited
+ * Copyright (c) 2010, 2015 ARM Limited
  * All rights reserved
  *
  * The license below extends only to copyright in the software and shall
@@ -33,62 +33,33 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * Authors: Ali Saidi
- *          William Wang
  */
 
 /** @file
  * Declaration of a VNC server
  */
 
-#ifndef __DEV_VNC_SERVER_HH__
-#define __DEV_VNC_SERVER_HH__
+#ifndef __BASE_VNC_VNC_SERVER_HH__
+#define __BASE_VNC_VNC_SERVER_HH__
 
 #include <iostream>
 
-#include "base/vnc/convert.hh"
-#include "base/bitmap.hh"
 #include "base/circlebuf.hh"
+#include "base/compiler.hh"
 #include "base/pollevent.hh"
 #include "base/socket.hh"
-#include "cpu/intr_control.hh"
+#include "base/vnc/vncinput.hh"
 #include "params/VncServer.hh"
 #include "sim/sim_object.hh"
 
-
-/**
- * A device that expects to receive input from the vnc server should derrive
- * (through mulitple inheritence if necessary from VncKeyboard or VncMouse
- * and call setKeyboard() or setMouse() respectively on the vnc server.
+/** @file
+ * Declaration of a VNC server
  */
-class VncKeyboard
-{
-  public:
-    /**
-     * Called when the vnc server receives a key press event from the
-     * client.
-     * @param key the key passed is an x11 keysym
-     * @param down is the key now down or up?
-     */
-    virtual void keyPress(uint32_t key, bool down) = 0;
-};
 
-class VncMouse
+namespace gem5
 {
-  public:
-    /**
-     * called whenever the mouse moves or it's button state changes
-     * buttons is a simple mask with each button (0-8) corresponding to
-     * a bit position in the byte with 1 being down and 0 being up
-     * @param x the x position of the mouse
-     * @param y the y position of the mouse
-     * @param buttos the button state as described above
-     */
-    virtual void mouseAt(uint16_t x, uint16_t y, uint8_t buttons) = 0;
-};
 
-class VncServer : public SimObject
+class VncServer : public VncInput
 {
   public:
 
@@ -103,18 +74,9 @@ class VncServer : public SimObject
     /** Error conditions */
     const static uint32_t VncOK   = 0;
 
-    /** Client -> Server message IDs */
-    enum ClientMessages {
-        ClientSetPixelFormat    = 0,
-        ClientSetEncodings      = 2,
-        ClientFrameBufferUpdate = 3,
-        ClientKeyEvent          = 4,
-        ClientPointerEvent      = 5,
-        ClientCutText           = 6
-    };
-
     /** Server -> Client message IDs */
-    enum ServerMessages {
+    enum ServerMessages
+    {
         ServerFrameBufferUpdate     = 0,
         ServerSetColorMapEntries    = 1,
         ServerBell                  = 2,
@@ -122,7 +84,8 @@ class VncServer : public SimObject
     };
 
     /** Encoding types */
-    enum EncodingTypes {
+    enum EncodingTypes
+    {
         EncodingRaw         = 0,
         EncodingCopyRect    = 1,
         EncodingHextile     = 5,
@@ -130,7 +93,8 @@ class VncServer : public SimObject
     };
 
     /** keyboard/mouse support */
-    enum MouseEvents {
+    enum MouseEvents
+    {
         MouseLeftButton     = 0x1,
         MouseRightButton    = 0x2,
         MouseMiddleButton   = 0x4
@@ -141,7 +105,8 @@ class VncServer : public SimObject
         return "RFB 003.008\n";
     }
 
-    enum ConnectionState {
+    enum ConnectionState
+    {
         WaitForProtocolVersion,
         WaitForSecurityResponse,
         WaitForClientInit,
@@ -149,88 +114,37 @@ class VncServer : public SimObject
         NormalPhase
     };
 
-    struct PixelFormat {
-        uint8_t bpp;
-        uint8_t depth;
-        uint8_t bigendian;
-        uint8_t truecolor;
-        uint16_t redmax;
-        uint16_t greenmax;
-        uint16_t bluemax;
-        uint8_t redshift;
-        uint8_t greenshift;
-        uint8_t blueshift;
-        uint8_t padding[3];
-    } M5_ATTR_PACKED;
-
-    struct ServerInitMsg {
+    struct GEM5_PACKED ServerInitMsg
+    {
         uint16_t fbWidth;
         uint16_t fbHeight;
         PixelFormat px;
         uint32_t namelen;
         char name[2]; // just to put M5 in here
-    } M5_ATTR_PACKED;
+    };
 
-    struct PixelFormatMessage {
-        uint8_t type;
-        uint8_t padding[3];
-        PixelFormat px;
-    } M5_ATTR_PACKED;
-
-    struct PixelEncodingsMessage {
-        uint8_t type;
-        uint8_t padding;
-        uint16_t num_encodings;
-    } M5_ATTR_PACKED;
-
-    struct FrameBufferUpdateReq {
-        uint8_t type;
-        uint8_t incremental;
-        uint16_t x;
-        uint16_t y;
-        uint16_t width;
-        uint16_t height;
-    } M5_ATTR_PACKED;
-
-    struct KeyEventMessage {
-        uint8_t type;
-        uint8_t down_flag;
-        uint8_t padding[2];
-        uint32_t key;
-    } M5_ATTR_PACKED;
-
-    struct PointerEventMessage {
-        uint8_t type;
-        uint8_t button_mask;
-        uint16_t x;
-        uint16_t y;
-    } M5_ATTR_PACKED;
-
-    struct ClientCutTextMessage {
-        uint8_t type;
-        uint8_t padding[3];
-        uint32_t length;
-    } M5_ATTR_PACKED;
-
-    struct FrameBufferUpdate {
+    struct GEM5_PACKED FrameBufferUpdate
+    {
         uint8_t type;
         uint8_t padding;
         uint16_t num_rects;
-    } M5_ATTR_PACKED;
+    };
 
-    struct FrameBufferRect {
+    struct GEM5_PACKED FrameBufferRect
+    {
         uint16_t x;
         uint16_t y;
         uint16_t width;
         uint16_t height;
         int32_t encoding;
-    } M5_ATTR_PACKED;
+    };
 
-    struct ServerCutText {
+    struct GEM5_PACKED ServerCutText
+    {
         uint8_t type;
         uint8_t padding[3];
         uint32_t length;
-    } M5_ATTR_PACKED;
+    };
 
     /** @} */
 
@@ -266,16 +180,16 @@ class VncServer : public SimObject
     int number;
     int dataFd; // data stream file describer
 
-    ListenSocket listener;
+    ListenSocketPtr listener;
 
-    void listen(int port);
+    void listen();
     void accept();
     void data();
     void detach();
 
   public:
     typedef VncServerParams Params;
-    VncServer(const Params *p);
+    VncServer(const Params &p);
     ~VncServer();
 
     // RFB
@@ -283,21 +197,6 @@ class VncServer : public SimObject
 
     /** The rfb prototol state the connection is in */
     ConnectionState curState;
-
-    /** the width of the frame buffer we are sending to the client */
-    uint16_t _videoWidth;
-
-    /** the height of the frame buffer we are sending to the client */
-    uint16_t _videoHeight;
-
-    /** pointer to the actual data that is stored in the frame buffer device */
-    uint8_t* clientRfb;
-
-    /** The device to notify when we get key events */
-    VncKeyboard *keyboard;
-
-    /** The device to notify when we get mouse events */
-    VncMouse *mouse;
 
     /** An update needs to be sent to the client. Without doing this the
      * client will constantly request data that is pointless */
@@ -312,31 +211,7 @@ class VncServer : public SimObject
     /** If the vnc client supports the desktop resize command */
     bool supportsResizeEnc;
 
-    /** The mode of data we're getting frame buffer in */
-    VideoConvert::Mode videoMode;
-
-    /** The video converter that transforms data for us */
-    VideoConvert *vc;
-
-    /** Flag indicating whether to capture snapshots of frame buffer or not */
-    bool captureEnabled;
-
-    /** Current frame number being captured to a file */
-    int captureCurrentFrame;
-
-    /** Directory to store captured frames to */
-    std::string captureOutputDirectory;
-
-    /** Computed hash of the last captured frame */
-    uint64_t captureLastHash;
-
-    /** Cached bitmap object for writing out frame buffers to file */
-    Bitmap *captureBitmap;
-
   protected:
-    /** Captures the current frame buffer to a file */
-    void captureFrameBuffer();
-
     /**
      * vnc client Interface
      */
@@ -349,9 +224,9 @@ class VncServer : public SimObject
     /** Read some data from the client
      * @param buf the data to read
      * @param len the amount of data to read
-     * @return length read
+     * @return whether the read was successful
      */
-    size_t read(uint8_t *buf, size_t len);
+    bool read(uint8_t *buf, size_t len);
 
     /** Read len -1 bytes from the client into the buffer provided + 1
      * assert that we read enough bytes. This function exists to handle
@@ -359,35 +234,35 @@ class VncServer : public SimObject
      * the first byte which describes which one we're reading
      * @param buf the address of the buffer to add one to and read data into
      * @param len the amount of data  + 1 to read
-     * @return length read
+     * @return whether the read was successful.
      */
-    size_t read1(uint8_t *buf, size_t len);
+    bool read1(uint8_t *buf, size_t len);
 
 
     /** Templated version of the read function above to
      * read simple data to the client
      * @param val data to recv from the client
      */
-    template <typename T> size_t read(T* val);
+    template <typename T> bool read(T* val);
 
 
     /** Write a buffer to the client.
      * @param buf buffer to send
      * @param len length of the buffer
-     * @return number of bytes sent
+     * @return whether the write was successful
      */
-    size_t write(const uint8_t *buf, size_t len);
+    bool write(const uint8_t *buf, size_t len);
 
     /** Templated version of the write function above to
      * write simple data to the client
      * @param val data to send to the client
      */
-    template <typename T> size_t write(T* val);
+    template <typename T> bool write(T* val);
 
     /** Send a string to the client
      * @param str string to transmit
      */
-    size_t write(const char* str);
+    bool write(const char* str);
 
     /** Check the client's protocol verion for compatibility and send
      * the security types we support
@@ -437,61 +312,13 @@ class VncServer : public SimObject
      */
     void sendFrameBufferResized();
 
+    static const PixelConverter pixelConverter;
+
   public:
-    /** Set the address of the frame buffer we are going to show.
-     * To avoid copying, just have the display controller
-     * tell us where the data is instead of constanly copying it around
-     * @param rfb frame buffer that we're going to use
-     */
-    void
-    setFramebufferAddr(uint8_t* rfb)
-    {
-        clientRfb = rfb;
-    }
-
-    /** Set up the device that would like to receive notifications when keys are
-     * pressed in the vnc client keyboard
-     * @param _keyboard an object that derrives from VncKeyboard
-     */
-    void setKeyboard(VncKeyboard *_keyboard) { keyboard = _keyboard; }
-
-    /** Setup the device that would like to receive notifications when mouse
-     * movements or button presses are received from the vnc client.
-     * @param _mouse an object that derrives from VncMouse
-     */
-    void setMouse(VncMouse *_mouse) { mouse = _mouse; }
-
-    /** The frame buffer uses this call to notify the vnc server that
-     * the frame buffer has been updated and a new image needs to be sent to the
-     * client
-     */
-    void
-    setDirty()
-    {
-        sendUpdate = true;
-        if (captureEnabled)
-            captureFrameBuffer();
-        sendFrameBufferUpdate();
-    }
-
-    /** What is the width of the screen we're displaying.
-     * This is used for pointer/tablet devices that need to know to calculate
-     * the correct value to send to the device driver.
-     * @return the width of the simulated screen
-     */
-    uint16_t videoWidth() { return _videoWidth; }
-
-    /** What is the height of the screen we're displaying.
-     * This is used for pointer/tablet devices that need to know to calculate
-     * the correct value to send to the device driver.
-     * @return the height of the simulated screen
-     */
-    uint16_t videoHeight() { return _videoHeight; }
-
-    /** Set the mode of the data the frame buffer will be sending us
-     * @param mode the mode
-     */
-    void setFrameBufferParams(VideoConvert::Mode mode, int width, int height);
+    void setDirty() override;
+    void frameBufferResized() override;
 };
+
+} // namespace gem5
 
 #endif

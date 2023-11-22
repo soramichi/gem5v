@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2004-2005 The Regents of The University of Michigan
+ * Copyright (c) 2013 Advanced Micro Devices, Inc.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -24,49 +25,29 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * Authors: Kevin Lim
  */
 
-#include "base/trace.hh"
 #include "cpu/o3/free_list.hh"
+
+#include "base/trace.hh"
 #include "debug/FreeList.hh"
 
-SimpleFreeList::SimpleFreeList(ThreadID activeThreads,
-                               unsigned _numLogicalIntRegs,
-                               unsigned _numPhysicalIntRegs,
-                               unsigned _numLogicalFloatRegs,
-                               unsigned _numPhysicalFloatRegs)
-    : numLogicalIntRegs(_numLogicalIntRegs),
-      numPhysicalIntRegs(_numPhysicalIntRegs),
-      numLogicalFloatRegs(_numLogicalFloatRegs),
-      numPhysicalFloatRegs(_numPhysicalFloatRegs),
-      numPhysicalRegs(numPhysicalIntRegs + numPhysicalFloatRegs)
+namespace gem5
+{
+
+namespace o3
+{
+
+UnifiedFreeList::UnifiedFreeList(const std::string &_my_name,
+                                 PhysRegFile *_regFile)
+    : _name(_my_name), regFile(_regFile)
 {
     DPRINTF(FreeList, "Creating new free list object.\n");
 
-    // Put all of the extra physical registers onto the free list.  This
-    // means excluding all of the base logical registers.
-    for (PhysRegIndex i = numLogicalIntRegs * activeThreads;
-         i < numPhysicalIntRegs; ++i)
-    {
-        freeIntRegs.push(i);
-    }
-
-    // Put all of the extra physical registers onto the free list.  This
-    // means excluding all of the base logical registers.  Because the
-    // float registers' indices start where the physical registers end,
-    // some math must be done to determine where the free registers start.
-    PhysRegIndex i = numPhysicalIntRegs + (numLogicalFloatRegs * activeThreads);
-
-    for ( ; i < numPhysicalRegs; ++i)
-    {
-        freeFloatRegs.push(i);
-    }
+    // Have the register file initialize the free list since it knows
+    // about its internal organization
+    regFile->initFreeList(this);
 }
 
-std::string
-SimpleFreeList::name() const
-{
-    return "cpu.freelist";
-}
+} // namespace o3
+} // namespace gem5

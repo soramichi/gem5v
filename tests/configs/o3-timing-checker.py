@@ -1,5 +1,5 @@
-# Copyright (c) 2011 ARM Limited
-# All rights reserved
+# Copyright (c) 2013 ARM Limited
+# All rights reserved.
 #
 # The license below extends only to copyright in the software and shall
 # not be construed as granting a license to any other intellectual
@@ -32,41 +32,13 @@
 # THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-#
-# Authors: Geoffrey Blake
 
-import m5
 from m5.objects import *
-m5.util.addToPath('../configs/common')
+from base_config import *
 
-class MyCache(BaseCache):
-    assoc = 2
-    block_size = 64
-    hit_latency = 2
-    response_latency = 2
-    mshrs = 10
-    tgts_per_mshr = 5
-
-class MyL1Cache(MyCache):
-    is_top_level = True
-    tgts_per_mshr = 20
-
-cpu = DerivO3CPU(cpu_id=0)
-cpu.createInterruptController()
-cpu.addCheckerCpu()
-cpu.addTwoLevelCacheHierarchy(MyL1Cache(size = '128kB'),
-                              MyL1Cache(size = '256kB'),
-                              MyCache(size = '2MB'))
-# @todo Note that the L2 latency here is unmodified and 2 cycles,
-# should set hit latency and response latency to 20 cycles as for
-# other scripts
-cpu.clock = '2GHz'
-
-system = System(cpu = cpu,
-                physmem = SimpleMemory(),
-                membus = CoherentBus())
-system.system_port = system.membus.slave
-system.physmem.port = system.membus.master
-cpu.connectAllPorts(system.membus)
-
-root = Root(full_system = False, system = system)
+root = BaseSESystemUniprocessor(
+    mem_mode="timing",
+    mem_class=DDR3_1600_8x8,
+    cpu_class=DerivO3CPU,
+    checker=True,
+).create_root()

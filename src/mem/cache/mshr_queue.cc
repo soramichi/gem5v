@@ -1,4 +1,16 @@
 /*
+ * Copyright (c) 2012-2013, 2015-2016, 2018 ARM Limited
+ * All rights reserved.
+ *
+ * The license below extends only to copyright in the software and shall
+ * not be construed as granting a license to any other intellectual
+ * property including but not limited to intellectual property relating
+ * to a hardware implementation of the functionality of the software
+ * licensed hereunder.  You may use the software subject to the license
+ * terms below provided that you ensure that this notice is replicated
+ * unmodified and in its entirety in all distributions of the software,
+ * modified or unmodified, in source code or in binary form.
+ *
  * Copyright (c) 2003-2005 The Regents of The University of Michigan
  * All rights reserved.
  *
@@ -24,8 +36,6 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * Authors: Erik Hallnor
  */
 
 /** @file
@@ -34,129 +44,34 @@
 
 #include "mem/cache/mshr_queue.hh"
 
-using namespace std;
+#include <cassert>
+
+#include "debug/MSHR.hh"
+#include "mem/cache/mshr.hh"
+
+namespace gem5
+{
 
 MSHRQueue::MSHRQueue(const std::string &_label,
-                     int num_entries, int reserve, int _index)
-    : label(_label),
-      numEntries(num_entries + reserve - 1), numReserve(reserve),
-      index(_index)
-{
-    allocated = 0;
-    inServiceEntries = 0;
-    registers = new MSHR[numEntries];
-    for (int i = 0; i < numEntries; ++i) {
-        registers[i].queue = this;
-        freeList.push_back(&registers[i]);
-    }
-}
-
-MSHRQueue::~MSHRQueue()
-{
-    delete [] registers;
-}
+                     int num_entries, int reserve,
+                     int demand_reserve, std::string cache_name = "")
+    : Queue<MSHR>(_label, num_entries, reserve, cache_name + ".mshr_queue"),
+      demandReserve(demand_reserve)
+{}
 
 MSHR *
-MSHRQueue::findMatch(Addr addr) const
-{
-    MSHR::ConstIterator i = allocatedList.begin();
-    MSHR::ConstIterator end = allocatedList.end();
-    for (; i != end; ++i) {
-        MSHR *mshr = *i;
-        if (mshr->addr == addr) {
-            return mshr;
-        }
-    }
-    return NULL;
-}
-
-bool
-MSHRQueue::findMatches(Addr addr, vector<MSHR*>& matches) const
-{
-    // Need an empty vector
-    assert(matches.empty());
-    bool retval = false;
-    MSHR::ConstIterator i = allocatedList.begin();
-    MSHR::ConstIterator end = allocatedList.end();
-    for (; i != end; ++i) {
-        MSHR *mshr = *i;
-        if (mshr->addr == addr) {
-            retval = true;
-            matches.push_back(mshr);
-        }
-    }
-    return retval;
-}
-
-
-bool
-MSHRQueue::checkFunctional(PacketPtr pkt, Addr blk_addr)
-{
-    pkt->pushLabel(label);
-    MSHR::ConstIterator i = allocatedList.begin();
-    MSHR::ConstIterator end = allocatedList.end();
-    for (; i != end; ++i) {
-        MSHR *mshr = *i;
-        if (mshr->addr == blk_addr && mshr->checkFunctional(pkt)) {
-            pkt->popLabel();
-            return true;
-        }
-    }
-    pkt->popLabel();
-    return false;
-}
-
-
-MSHR *
-MSHRQueue::findPending(Addr addr, int size) const
-{
-    MSHR::ConstIterator i = readyList.begin();
-    MSHR::ConstIterator end = readyList.end();
-    for (; i != end; ++i) {
-        MSHR *mshr = *i;
-        if (mshr->addr < addr) {
-            if (mshr->addr + mshr->size > addr) {
-                return mshr;
-            }
-        } else {
-            if (addr + size > mshr->addr) {
-                return mshr;
-            }
-        }
-    }
-    return NULL;
-}
-
-
-MSHR::Iterator
-MSHRQueue::addToReadyList(MSHR *mshr)
-{
-    if (readyList.empty() || readyList.back()->readyTime <= mshr->readyTime) {
-        return readyList.insert(readyList.end(), mshr);
-    }
-
-    MSHR::Iterator i = readyList.begin();
-    MSHR::Iterator end = readyList.end();
-    for (; i != end; ++i) {
-        if ((*i)->readyTime > mshr->readyTime) {
-            return readyList.insert(i, mshr);
-        }
-    }
-    assert(false);
-    return end;  // keep stupid compilers happy
-}
-
-
-MSHR *
-MSHRQueue::allocate(Addr addr, int size, PacketPtr &pkt,
-                    Tick when, Counter order)
+MSHRQueue::allocate(Addr blk_addr, unsigned blk_size, PacketPtr pkt,
+                    Tick when_ready, Counter order, bool alloc_on_fill)
 {
     assert(!freeList.empty());
     MSHR *mshr = freeList.front();
     assert(mshr->getNumTargets() == 0);
     freeList.pop_front();
 
-    mshr->allocate(addr, size, pkt, when, order);
+    DPRINTF(MSHR, "Allocating new MSHR. Number in use will be %lu/%lu\n",
+            allocatedList.size() + 1, numEntries);
+
+    mshr->allocate(blk_addr, blk_size, pkt, when_ready, order, alloc_on_fill);
     mshr->allocIter = allocatedList.insert(allocatedList.end(), mshr);
     mshr->readyIter = addToReadyList(mshr);
 
@@ -164,27 +79,16 @@ MSHRQueue::allocate(Addr addr, int size, PacketPtr &pkt,
     return mshr;
 }
 
-
 void
-MSHRQueue::deallocate(MSHR *mshr)
+MSHRQueue::deallocate(MSHR* mshr)
 {
-    deallocateOne(mshr);
+
+    DPRINTF(MSHR, "Deallocating all targets: %s", mshr->print());
+    Queue<MSHR>::deallocate(mshr);
+    DPRINTF(MSHR, "MSHR deallocated. Number in use: %lu/%lu\n",
+            allocatedList.size(), numEntries);
 }
 
-MSHR::Iterator
-MSHRQueue::deallocateOne(MSHR *mshr)
-{
-    MSHR::Iterator retval = allocatedList.erase(mshr->allocIter);
-    freeList.push_front(mshr);
-    allocated--;
-    if (mshr->inService) {
-        inServiceEntries--;
-    } else {
-        readyList.erase(mshr->readyIter);
-    }
-    mshr->deallocate();
-    return retval;
-}
 
 void
 MSHRQueue::moveToFront(MSHR *mshr)
@@ -197,14 +101,22 @@ MSHRQueue::moveToFront(MSHR *mshr)
 }
 
 void
-MSHRQueue::markInService(MSHR *mshr, PacketPtr pkt)
+MSHRQueue::delay(MSHR *mshr, Tick delay_ticks)
 {
-    if (mshr->markInService(pkt)) {
-        deallocate(mshr);
-    } else {
-        readyList.erase(mshr->readyIter);
-        inServiceEntries += 1;
-    }
+    mshr->delay(delay_ticks);
+    auto it = std::find_if(mshr->readyIter, readyList.end(),
+                            [mshr] (const MSHR* _mshr) {
+                                return mshr->readyTime >= _mshr->readyTime;
+                            });
+    readyList.splice(it, readyList, mshr->readyIter);
+}
+
+void
+MSHRQueue::markInService(MSHR *mshr, bool pending_modified_resp)
+{
+    mshr->markInService(pending_modified_resp);
+    readyList.erase(mshr->readyIter);
+    _numInService += 1;
 }
 
 void
@@ -212,7 +124,7 @@ MSHRQueue::markPending(MSHR *mshr)
 {
     assert(mshr->inService);
     mshr->inService = false;
-    --inServiceEntries;
+    --_numInService;
     /**
      * @ todo might want to add rerequests to front of pending list for
      * performance.
@@ -220,28 +132,20 @@ MSHRQueue::markPending(MSHR *mshr)
     mshr->readyIter = addToReadyList(mshr);
 }
 
-void
-MSHRQueue::squash(int threadNum)
+bool
+MSHRQueue::forceDeallocateTarget(MSHR *mshr)
 {
-    MSHR::Iterator i = allocatedList.begin();
-    MSHR::Iterator end = allocatedList.end();
-    for (; i != end;) {
-        MSHR *mshr = *i;
-        if (mshr->threadNum == threadNum) {
-            while (mshr->hasTargets()) {
-                mshr->popTarget();
-                assert(0/*target->req->threadId()*/ == threadNum);
-            }
-            assert(!mshr->hasTargets());
-            assert(mshr->ntargets==0);
-            if (!mshr->inService) {
-                i = deallocateOne(mshr);
-            } else {
-                //mshr->pkt->flags &= ~CACHE_LINE_FILL;
-                ++i;
-            }
-        } else {
-            ++i;
-        }
+    bool was_full = isFull();
+    assert(mshr->hasTargets());
+    // Pop the prefetch off of the target list
+    mshr->popTarget();
+    // Delete mshr if no remaining targets
+    if (!mshr->hasTargets() && !mshr->promoteDeferredTargets()) {
+        deallocate(mshr);
     }
+
+    // Notify if MSHR queue no longer full
+    return was_full && !isFull();
 }
+
+} // namespace gem5

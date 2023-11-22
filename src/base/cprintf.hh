@@ -1,4 +1,5 @@
 /*
+ * Copyright (c) 2014 ARM Limited
  * Copyright (c) 2002-2006 The Regents of The University of Michigan
  * All rights reserved.
  *
@@ -24,9 +25,6 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * Authors: Nathan Binkert
- *          Steve Reinhardt
  */
 
 #ifndef __BASE_CPRINTF_HH__
@@ -38,12 +36,11 @@
 #include <string>
 
 #include "base/cprintf_formats.hh"
-#include "base/varargs.hh"
+
+namespace gem5
+{
 
 namespace cp {
-
-#define CPRINTF_DECLARATION VARARGS_DECLARATION(cp::Print)
-#define CPRINTF_DEFINITION VARARGS_DEFINITION(cp::Print)
 
 struct Print
 {
@@ -53,12 +50,14 @@ struct Print
     const char *ptr;
     bool cont;
 
-    std::ios::fmtflags saved_flags;
-    char saved_fill;
-    int saved_precision;
+    std::ios::fmtflags savedFlags;
+    char savedFill;
+    int savedPrecision;
+    int savedWidth;
 
     Format fmt;
     void process();
+    void processFlag();
 
   public:
     Print(std::ostream &stream, const std::string &format);
@@ -66,54 +65,54 @@ struct Print
     ~Print();
 
     int
-    get_number(int data)
+    getNumber(int data)
     {
         return data;
     }
-    
+
     template <typename T>
     int
-    get_number(const T& data)
+    getNumber(const T& data)
     {
         return 0;
     }
 
     template <typename T>
     void
-    add_arg(const T &data)
+    addArg(const T &data)
     {
         if (!cont)
             process();
 
-        if (fmt.get_width) {
-            fmt.get_width = false;
+        if (fmt.getWidth) {
+            fmt.getWidth = false;
             cont = true;
-            fmt.width = get_number(data);
+            fmt.width = getNumber(data);
             return;
         }
-            
-        if (fmt.get_precision) {
-            fmt.get_precision = false;
+
+        if (fmt.getPrecision) {
+            fmt.getPrecision = false;
             cont = true;
-            fmt.precision = get_number(data);
+            fmt.precision = getNumber(data);
             return;
         }
 
         switch (fmt.format) {
-          case Format::character:
-            format_char(stream, data, fmt);
+          case Format::Character:
+            formatChar(stream, data, fmt);
             break;
 
-          case Format::integer:
-            format_integer(stream, data, fmt);
+          case Format::Integer:
+            formatInteger(stream, data, fmt);
             break;
 
-          case Format::floating:
-            format_float(stream, data, fmt);
+          case Format::Floating:
+            formatFloat(stream, data, fmt);
             break;
 
-          case Format::string:
-            format_string(stream, data, fmt);
+          case Format::String:
+            formatString(stream, data, fmt);
             break;
 
           default:
@@ -122,38 +121,47 @@ struct Print
         }
     }
 
-    void end_args();
+    void endArgs();
 };
 
 } // namespace cp
 
-typedef VarArgs::List<cp::Print> CPrintfArgsList;
-
 inline void
-ccprintf(std::ostream &stream, const char *format, const CPrintfArgsList &args)
+ccprintf(cp::Print &print)
+{
+    print.endArgs();
+}
+
+
+template<typename T, typename ...Args> void
+ccprintf(cp::Print &print, const T &value, const Args &...args)
+{
+    print.addArg(value);
+
+    ccprintf(print, args...);
+}
+
+
+template<typename ...Args> void
+ccprintf(std::ostream &stream, const char *format, const Args &...args)
 {
     cp::Print print(stream, format);
-    args.add_args(print);
+
+    ccprintf(print, args...);
 }
 
-inline void
-ccprintf(std::ostream &stream, const char *format, CPRINTF_DECLARATION)
+
+template<typename ...Args> void
+cprintf(const char *format, const Args &...args)
 {
-    cp::Print print(stream, format);
-    VARARGS_ADDARGS(print);
+    ccprintf(std::cout, format, args...);
 }
 
-inline void
-cprintf(const char *format, CPRINTF_DECLARATION)
-{
-    ccprintf(std::cout, format, VARARGS_ALLARGS);
-}
-
-inline std::string
-csprintf(const char *format, CPRINTF_DECLARATION)
+template<typename ...Args> std::string
+csprintf(const char *format, const Args &...args)
 {
     std::stringstream stream;
-    ccprintf(stream, format, VARARGS_ALLARGS);
+    ccprintf(stream, format, args...);
     return stream.str();
 }
 
@@ -162,31 +170,24 @@ csprintf(const char *format, CPRINTF_DECLARATION)
  * time converting const char * to std::string since we don't take
  * advantage of it.
  */
-inline void
-ccprintf(std::ostream &stream, const std::string &format,
-         const CPrintfArgsList &args)
+template<typename ...Args> void
+ccprintf(std::ostream &stream, const std::string &format, const Args &...args)
 {
-    ccprintf(stream, format.c_str(), args);
+    ccprintf(stream, format.c_str(), args...);
 }
 
-inline void
-ccprintf(std::ostream &stream, const std::string &format, CPRINTF_DECLARATION)
+template<typename ...Args> void
+cprintf(const std::string &format, const Args &...args)
 {
-    ccprintf(stream, format.c_str(), VARARGS_ALLARGS);
+    ccprintf(std::cout, format.c_str(), args...);
 }
 
-inline void
-cprintf(const std::string &format, CPRINTF_DECLARATION)
+template<typename ...Args> std::string
+csprintf(const std::string &format, const Args &...args)
 {
-    ccprintf(std::cout, format.c_str(), VARARGS_ALLARGS);
+    return csprintf(format.c_str(), args...);
 }
 
-inline std::string
-csprintf(const std::string &format, CPRINTF_DECLARATION)
-{
-    std::stringstream stream;
-    ccprintf(stream, format.c_str(), VARARGS_ALLARGS);
-    return stream.str();
-}
+} // namespace gem5
 
 #endif // __CPRINTF_HH__

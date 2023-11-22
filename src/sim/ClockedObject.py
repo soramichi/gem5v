@@ -1,4 +1,4 @@
-# Copyright (c) 2012 ARM Limited
+# Copyright (c) 2012, 2015-2017, 2019-2020 ARM Limited
 # All rights reserved.
 #
 # The license below extends only to copyright in the software and shall
@@ -32,22 +32,24 @@
 # THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-#
-# Authors: Andreas Hansson
 
+from m5.objects.PowerState import PowerState
 from m5.SimObject import SimObject
 from m5.params import *
 from m5.proxy import *
 
-class ClockedObject(SimObject):
-    type = 'ClockedObject'
-    abstract = True
 
-    # Clock period of this object, with the default value being the
-    # clock period of the parent object, unproxied at instantiation
-    # time
-    clock = Param.Clock(Parent.clock, "Clock speed")
-    periodic_schedule = Param.Bool(False, "if this should be periodicly scheduled. vCPU?")
-    periodic_schedule_hyperperiod = Param.Tick(10000, "")
-    periodic_schedule_start_tick = Param.Tick(0, "when should this clocked object (vcpu) start processing")
-    periodic_schedule_stop_tick = Param.Tick(10000, "when should this clocked object (vcpu) stop processing and schedule next event in next start")
+class ClockedObject(SimObject):
+    type = "ClockedObject"
+    abstract = True
+    cxx_header = "sim/clocked_object.hh"
+    cxx_class = "gem5::ClockedObject"
+
+    # The clock domain this clocked object belongs to, inheriting the
+    # parent's clock domain by default
+    clk_domain = Param.ClockDomain(Parent.clk_domain, "Clock domain")
+
+    # Power model for this ClockedObject
+    power_model = VectorParam.PowerModel([], "Power models")
+
+    power_state = Param.PowerState(PowerState(), "Power state")

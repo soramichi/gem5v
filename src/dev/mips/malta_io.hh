@@ -24,10 +24,6 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * Authors: Ali Saidi
- *          Andrew Schultz
- *          Miguel Serrano
  */
 
 /** @file
@@ -38,11 +34,15 @@
 #define __DEV_MALTA_IO_HH__
 
 #include "dev/mips/malta.hh"
+#include "dev/mips/malta_cchip.hh"
 #include "dev/intel_8254_timer.hh"
 #include "dev/io_device.hh"
 #include "dev/mc146818.hh"
 #include "params/MaltaIO.hh"
 #include "sim/eventq.hh"
+
+namespace gem5
+{
 
 /**
  * Malta I/O device is a catch all for all the south bridge stuff we care
@@ -50,16 +50,13 @@
  */
 class MaltaIO : public BasicPioDevice
 {
-  private:
-    struct tm tm;
-
   protected:
 
     class RTC : public MC146818
     {
       public:
         Malta *malta;
-        RTC(const std::string &name, const MaltaIOParams *p);
+        RTC(const std::string &name, const MaltaIOParams &p);
 
       protected:
         void handleEvent()
@@ -108,22 +105,16 @@ class MaltaIO : public BasicPioDevice
      */
     Tick frequency() const;
 
-    typedef MaltaIOParams Params;
-
-    const Params *
-    params() const
-    {
-        return dynamic_cast<const Params *>(_params);
-    }
+    PARAMS(MaltaIO);
 
     /**
      * Initialize all the data for devices supported by Malta I/O.
      * @param p pointer to Params struct
      */
-    MaltaIO(const Params *p);
+    MaltaIO(const Params &p);
 
-    virtual Tick read(PacketPtr pkt);
-    virtual Tick write(PacketPtr pkt);
+    Tick read(PacketPtr pkt) override;
+    Tick write(PacketPtr pkt) override;
 
 
     /** Post an Interrupt to the CPU */
@@ -132,19 +123,16 @@ class MaltaIO : public BasicPioDevice
     /** Clear an Interrupt to the CPU */
     void clearIntr(uint8_t interrupt);
 
-    /**
-     * Serialize this object to the given output stream.
-     * @param os The stream to serialize to.
-     */
-    virtual void serialize(std::ostream &os);
+    void serialize(CheckpointOut &cp) const override;
+    void unserialize(CheckpointIn &cp) override;
 
     /**
-     * Reconstruct the state of this object from a checkpoint.
-     * @param cp The checkpoint use.
-     * @param section The section name of this object
+     * Start running.
      */
-    virtual void unserialize(Checkpoint *cp, const std::string &section);
+    void startup() override;
 
 };
+
+} // namespace gem5
 
 #endif // __DEV_MALTA_IO_HH__

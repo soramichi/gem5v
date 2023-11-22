@@ -28,28 +28,29 @@
 from slicc.ast.DeclAST import DeclAST
 from slicc.symbols import StateMachine, Type
 
-class MachineAST(DeclAST):
-    def __init__(self, slicc, ident, pairs_ast, config_parameters, decls):
-        super(MachineAST, self).__init__(slicc, pairs_ast)
 
-        self.ident = ident
+class MachineAST(DeclAST):
+    def __init__(self, slicc, mtype, pairs_ast, config_parameters, decls):
+        super().__init__(slicc, pairs_ast)
+
+        self.ident = mtype.value
         self.pairs_ast = pairs_ast
         self.config_parameters = config_parameters
         self.decls = decls
 
     def __repr__(self):
-        return "[Machine: %r]" % self.ident
+        return f"[Machine: {self.ident!r}]"
 
     def files(self, parent=None):
-        s = set(('%s_Controller.cc' % self.ident,
-                 '%s_Controller.hh' % self.ident,
-                 '%s_Controller.py' % self.ident,
-                 '%s_Profiler.cc' % self.ident,
-                 '%s_Profiler.hh' % self.ident,
-                 '%s_ProfileDumper.cc' % self.ident,
-                 '%s_ProfileDumper.hh' % self.ident,
-                 '%s_Transitions.cc' % self.ident,
-                 '%s_Wakeup.cc' % self.ident))
+        s = set(
+            (
+                f"{self.ident}_Controller.cc",
+                f"{self.ident}_Controller.hh",
+                f"{self.ident}_Controller.py",
+                f"{self.ident}_Transitions.cc",
+                f"{self.ident}_Wakeup.cc",
+            )
+        )
 
         s |= self.decls.files(self.ident)
         return s
@@ -59,8 +60,13 @@ class MachineAST(DeclAST):
         self.symtab.pushFrame()
 
         # Create a new machine
-        machine = StateMachine(self.symtab, self.ident, self.location,
-                               self.pairs, self.config_parameters)
+        machine = StateMachine(
+            self.symtab,
+            self.ident,
+            self.location,
+            self.pairs,
+            self.config_parameters,
+        )
 
         self.symtab.newCurrentMachine(machine)
 
@@ -74,11 +80,7 @@ class MachineAST(DeclAST):
         self.symtab.popFrame()
 
     def findMachines(self):
-        # Add to MachineType enumeration
+        mtype = self.ident
         machine_type = self.symtab.find("MachineType", Type)
-        if not machine_type.addEnum(self.ident, self.pairs_ast.pairs):
-            self.error("Duplicate machine name: %s:%s" % (machine_type,
-                                                          self.ident))
-
-        # Generate code for all the internal decls
-        self.decls.findMachines()
+        if not machine_type.checkEnum(mtype):
+            self.error(f"Duplicate machine name: {machine_type}:{mtype}")

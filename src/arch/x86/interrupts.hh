@@ -45,34 +45,44 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * Authors: Gabe Black
- *          Andreas Hansson
  */
 
 #ifndef __ARCH_X86_INTERRUPTS_HH__
 #define __ARCH_X86_INTERRUPTS_HH__
 
-#include "arch/x86/regs/apic.hh"
+#include "arch/generic/interrupts.hh"
 #include "arch/x86/faults.hh"
 #include "arch/x86/intmessage.hh"
+#include "arch/x86/regs/apic.hh"
 #include "base/bitfield.hh"
 #include "cpu/thread_context.hh"
-#include "dev/x86/intdev.hh"
+#include "dev/intpin.hh"
 #include "dev/io_device.hh"
+#include "dev/x86/intdev.hh"
 #include "params/X86LocalApic.hh"
 #include "sim/eventq.hh"
+
+namespace gem5
+{
 
 class ThreadContext;
 class BaseCPU;
 
-namespace X86ISA {
+int divideFromConf(uint32_t conf);
 
-class Interrupts : public BasicPioDevice, IntDev
+namespace X86ISA
+{
+
+ApicRegIndex decodeAddr(Addr paddr);
+
+class Interrupts : public BaseInterrupts
 {
   protected:
+    System *sys = nullptr;
+    ClockDomain &clockDomain;
+
     // Storage for the APIC registers
-    uint32_t regs[NUM_APIC_REGS];
+    uint32_t regs[NUM_APIC_REGS] = {};
 
     BitUnion32(LVTEntry)
         Bitfield<7, 0> vector;
@@ -88,56 +98,36 @@ class Interrupts : public BasicPioDevice, IntDev
     /*
      * Timing related stuff.
      */
-    Tick latency;
-
-    class ApicTimerEvent : public Event
-    {
-      private:
-        Interrupts *localApic;
-      public:
-        ApicTimerEvent(Interrupts *_localApic) :
-            Event(), localApic(_localApic)
-        {}
-
-        void process()
-        {
-            assert(localApic);
-            if (localApic->triggerTimerInterrupt()) {
-                localApic->setReg(APIC_INITIAL_COUNT,
-                        localApic->readReg(APIC_INITIAL_COUNT));
-            }
-        }
-    };
-
-    ApicTimerEvent apicTimerEvent;
+    EventFunctionWrapper apicTimerEvent;
+    void processApicTimerEvent();
 
     /*
      * A set of variables to keep track of interrupts that don't go through
      * the IRR.
      */
-    bool pendingSmi;
-    uint8_t smiVector;
-    bool pendingNmi;
-    uint8_t nmiVector;
-    bool pendingExtInt;
-    uint8_t extIntVector;
-    bool pendingInit;
-    uint8_t initVector;
-    bool pendingStartup;
-    uint8_t startupVector;
-    bool startedUp;
+    bool pendingSmi = false;
+    uint8_t smiVector = 0;
+    bool pendingNmi = false;
+    uint8_t nmiVector = 0;
+    bool pendingExtInt = false;
+    uint8_t extIntVector = 0;
+    bool pendingInit = false;
+    uint8_t initVector = 0;
+    bool pendingStartup = false;
+    uint8_t startupVector = 0;
+    bool startedUp = false;
 
     // This is a quick check whether any of the above (except ExtInt) are set.
-    bool pendingUnmaskableInt;
+    bool pendingUnmaskableInt = false;
 
     // A count of how many IPIs are in flight.
-    int pendingIPIs;
+    int pendingIPIs = 0;
 
     /*
      * IRR and ISR maintenance.
      */
-    uint8_t IRRV;
-    uint8_t ISRV;
+    uint8_t IRRV = 0;
+    uint8_t ISRV = 0;
 
     int
     findRegArrayMSB(ApicRegIndex base)
@@ -178,17 +168,28 @@ class Interrupts : public BasicPioDevice, IntDev
     bool
     getRegArrayBit(ApicRegIndex base, uint8_t vector)
     {
-        return bits(regs[base + (vector / 32)], vector % 5);
+        return bits(regs[base + (vector / 32)], vector % 32);
     }
+
+    Tick clockPeriod() const { return clockDomain.clockPeriod(); }
 
     void requestInterrupt(uint8_t vector, uint8_t deliveryMode, bool level);
 
-    BaseCPU *cpu;
+    int initialApicId = 0;
 
-    int initialApicId;
+    // Ports for interrupt messages.
+    IntResponsePort<Interrupts> intResponsePort;
+    IntRequestPort<Interrupts> intRequestPort;
 
-    // Port for receiving interrupts
-    IntSlavePort intSlavePort;
+    // Pins for wired interrupts.
+    IntSinkPin<Interrupts> lint0Pin;
+    IntSinkPin<Interrupts> lint1Pin;
+
+    // Port for memory mapped register accesses.
+    PioPort<Interrupts> pioPort;
+
+    Tick pioDelay = 0;
+    Addr pioAddr = MaxAddr;
 
   public:
 
@@ -197,34 +198,22 @@ class Interrupts : public BasicPioDevice, IntDev
     /*
      * Params stuff.
      */
-    typedef X86LocalApicParams Params;
+    using Params = X86LocalApicParams;
 
-    void setCPU(BaseCPU * newCPU);
-
-    void
-    setClock(Tick newClock)
-    {
-        clock = newClock;
-    }
-
-    const Params *
-    params() const
-    {
-        return dynamic_cast<const Params *>(_params);
-    }
+    void setThreadContext(ThreadContext *_tc) override;
 
     /*
      * Initialize this object by registering it with the IO APIC.
      */
-    void init();
+    void init() override;
 
     /*
-     * Functions to interact with the interrupt port from IntDev.
+     * Functions to interact with the interrupt port.
      */
     Tick read(PacketPtr pkt);
     Tick write(PacketPtr pkt);
     Tick recvMessage(PacketPtr pkt);
-    Tick recvResponse(PacketPtr pkt);
+    void completeIPI(PacketPtr pkt);
 
     bool
     triggerTimerInterrupt()
@@ -238,22 +227,26 @@ class Interrupts : public BasicPioDevice, IntDev
     AddrRangeList getAddrRanges() const;
     AddrRangeList getIntAddrRange() const;
 
-    BaseMasterPort &getMasterPort(const std::string &if_name,
-                                  PortID idx = InvalidPortID)
-    {
-        if (if_name == "int_master") {
-            return intMasterPort;
-        }
-        return BasicPioDevice::getMasterPort(if_name, idx);
-    }
+    void raiseInterruptPin(int number);
+    void lowerInterruptPin(int number);
 
-    BaseSlavePort &getSlavePort(const std::string &if_name,
-                                PortID idx = InvalidPortID)
+    Port &
+    getPort(const std::string &if_name,
+            PortID idx=InvalidPortID) override
     {
-        if (if_name == "int_slave") {
-            return intSlavePort;
+        if (if_name == "int_requestor") {
+            return intRequestPort;
+        } else if (if_name == "int_responder") {
+            return intResponsePort;
+        } else if (if_name == "pio") {
+            return pioPort;
+        } else if (if_name == "lint0") {
+            return lint0Pin;
+        } else if (if_name == "lint1") {
+            return lint1Pin;
+        } else {
+            return SimObject::getPort(if_name, idx);
         }
-        return BasicPioDevice::getSlavePort(if_name, idx);
     }
 
     /*
@@ -272,46 +265,59 @@ class Interrupts : public BasicPioDevice, IntDev
      * Constructor.
      */
 
-    Interrupts(Params * p);
+    Interrupts(const Params &p);
 
     /*
      * Functions for retrieving interrupts for the CPU to handle.
      */
 
-    bool checkInterrupts(ThreadContext *tc) const;
-    Fault getInterrupt(ThreadContext *tc);
-    void updateIntrInfo(ThreadContext *tc);
+    bool checkInterrupts() const override;
+    /**
+     * Check if there are pending interrupts without ignoring the
+     * interrupts disabled flag.
+     *
+     * @return true if there are interrupts pending.
+     */
+    bool checkInterruptsRaw() const;
+    /**
+     * Check if there are pending unmaskable interrupts.
+     *
+     * @return true there are unmaskable interrupts pending.
+     */
+    bool hasPendingUnmaskable() const { return pendingUnmaskableInt; }
+    Fault getInterrupt() override;
+    void updateIntrInfo() override;
 
     /*
      * Serialization.
      */
-
-    virtual void serialize(std::ostream &os);
-    virtual void unserialize(Checkpoint *cp, const std::string &section);
+    void serialize(CheckpointOut &cp) const override;
+    void unserialize(CheckpointIn &cp) override;
 
     /*
      * Old functions needed for compatability but which will be phased out
      * eventually.
      */
     void
-    post(int int_num, int index)
+    post(int int_num, int index) override
     {
         panic("Interrupts::post unimplemented!\n");
     }
 
     void
-    clear(int int_num, int index)
+    clear(int int_num, int index) override
     {
         panic("Interrupts::clear unimplemented!\n");
     }
 
     void
-    clearAll()
+    clearAll() override
     {
         panic("Interrupts::clearAll unimplemented!\n");
     }
 };
 
 } // namespace X86ISA
+} // namespace gem5
 
 #endif // __ARCH_X86_INTERRUPTS_HH__

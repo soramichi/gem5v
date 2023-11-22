@@ -1,4 +1,16 @@
 /*
+ * Copyright (c) 2012-2013 ARM Limited
+ * All rights reserved
+ *
+ * The license below extends only to copyright in the software and shall
+ * not be construed as granting a license to any other intellectual
+ * property including but not limited to intellectual property relating
+ * to a hardware implementation of the functionality of the software
+ * licensed hereunder.  You may use the software subject to the license
+ * terms below provided that you ensure that this notice is replicated
+ * unmodified and in its entirety in all distributions of the software,
+ * modified or unmodified, in source code or in binary form.
+ *
  * Copyright (c) 2006 The Regents of The University of Michigan
  * All rights reserved.
  *
@@ -24,16 +36,19 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * Authors: Kevin Lim
  */
+
+#include "cpu/o3/fu_pool.hh"
 
 #include <sstream>
 
-#include "cpu/o3/fu_pool.hh"
 #include "cpu/func_unit.hh"
 
-using namespace std;
+namespace gem5
+{
+
+namespace o3
+{
 
 ////////////////////////////////////////////////////////////////////////////
 //
@@ -68,22 +83,20 @@ FUPool::~FUPool()
 
 
 // Constructor
-FUPool::FUPool(const Params *p)
+FUPool::FUPool(const Params &p)
     : SimObject(p)
 {
     numFU = 0;
 
     funcUnits.clear();
 
-    for (int i = 0; i < Num_OpClasses; ++i) {
-        maxOpLatencies[i] = Cycles(0);
-        maxIssueLatencies[i] = Cycles(0);
-    }
+    maxOpLatencies.fill(Cycles(0));
+    pipelined.fill(true);
 
     //
     //  Iterate through the list of FUDescData structures
     //
-    const vector<FUDesc *> &paramList =  p->FUList;
+    const std::vector<FUDesc *> &paramList =  p.FUList;
     for (FUDDiterator i = paramList.begin(); i != paramList.end(); ++i) {
 
         //
@@ -111,26 +124,23 @@ FUPool::FUPool(const Params *p)
                     fuPerCapList[(*j)->opClass].addFU(numFU + k);
 
                 // indicate that this FU has the capability
-                fu->addCapability((*j)->opClass, (*j)->opLat, (*j)->issueLat);
+                fu->addCapability((*j)->opClass, (*j)->opLat, (*j)->pipelined);
 
                 if ((*j)->opLat > maxOpLatencies[(*j)->opClass])
                     maxOpLatencies[(*j)->opClass] = (*j)->opLat;
 
-                if ((*j)->issueLat > maxIssueLatencies[(*j)->opClass])
-                    maxIssueLatencies[(*j)->opClass] = (*j)->issueLat;
+                if (!(*j)->pipelined)
+                    pipelined[(*j)->opClass] = false;
             }
 
             numFU++;
 
             //  Add the appropriate number of copies of this FU to the list
-            ostringstream s;
-
-            s << (*i)->name() << "(0)";
-            fu->name = s.str();
+            fu->name = (*i)->name() + "(0)";
             funcUnits.push_back(fu);
 
             for (int c = 1; c < (*i)->number; ++c) {
-                ostringstream s;
+                std::ostringstream s;
                 numFU++;
                 FuncUnit *fu2 = new FuncUnit(*fu);
 
@@ -145,22 +155,6 @@ FUPool::FUPool(const Params *p)
 
     for (int i = 0; i < numFU; i++) {
         unitBusy[i] = false;
-    }
-}
-
-void
-FUPool::annotateMemoryUnits(Cycles hit_latency)
-{
-    maxOpLatencies[MemReadOp] = hit_latency;
-
-    fuListIterator i = funcUnits.begin();
-    fuListIterator iend = funcUnits.end();
-    for (; i != iend; ++i) {
-        if ((*i)->provides(MemReadOp))
-            (*i)->opLatency(MemReadOp) = hit_latency;
-
-        if ((*i)->provides(MemWriteOp))
-            (*i)->opLatency(MemWriteOp) = hit_latency;
     }
 }
 
@@ -215,68 +209,46 @@ FUPool::processFreeUnits()
 void
 FUPool::dump()
 {
-    cout << "Function Unit Pool (" << name() << ")\n";
-    cout << "======================================\n";
-    cout << "Free List:\n";
+    std::cout << "Function Unit Pool (" << name() << ")\n";
+    std::cout << "======================================\n";
+    std::cout << "Free List:\n";
 
     for (int i = 0; i < numFU; ++i) {
         if (unitBusy[i]) {
             continue;
         }
 
-        cout << "  [" << i << "] : ";
+        std::cout << "  [" << i << "] : ";
 
-        cout << funcUnits[i]->name << " ";
+        std::cout << funcUnits[i]->name << " ";
 
-        cout << "\n";
+        std::cout << "\n";
     }
 
-    cout << "======================================\n";
-    cout << "Busy List:\n";
+    std::cout << "======================================\n";
+    std::cout << "Busy List:\n";
     for (int i = 0; i < numFU; ++i) {
         if (!unitBusy[i]) {
             continue;
         }
 
-        cout << "  [" << i << "] : ";
+        std::cout << "  [" << i << "] : ";
 
-        cout << funcUnits[i]->name << " ";
+        std::cout << funcUnits[i]->name << " ";
 
-        cout << "\n";
+        std::cout << "\n";
     }
 }
 
-void
-FUPool::switchOut()
+bool
+FUPool::isDrained() const
 {
+    bool is_drained = true;
+    for (int i = 0; i < numFU; i++)
+        is_drained = is_drained && !unitBusy[i];
+
+    return is_drained;
 }
 
-void
-FUPool::takeOver()
-{
-    for (int i = 0; i < numFU; i++) {
-        unitBusy[i] = false;
-    }
-    unitsToBeFreed.clear();
-}
-
-//
-
-////////////////////////////////////////////////////////////////////////////
-//
-//  The SimObjects we use to get the FU information into the simulator
-//
-////////////////////////////////////////////////////////////////////////////
-
-//
-//    FUPool - Contails a list of FUDesc objects to make available
-//
-
-//
-//  The FuPool object
-//
-FUPool *
-FUPoolParams::create()
-{
-    return new FUPool(this);
-}
+} // namespace o3
+} // namespace gem5

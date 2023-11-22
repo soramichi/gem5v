@@ -1,3 +1,15 @@
+# Copyright (c) 2013 ARM Limited
+# All rights reserved.
+#
+# The license below extends only to copyright in the software and shall
+# not be construed as granting a license to any other intellectual
+# property including but not limited to intellectual property relating
+# to a hardware implementation of the functionality of the software
+# licensed hereunder.  You may use the software subject to the license
+# terms below provided that you ensure that this notice is replicated
+# unmodified and in its entirety in all distributions of the software,
+# modified or unmodified, in source code or in binary form.
+#
 # Copyright (c) 2006-2007 The Regents of The University of Michigan
 # All rights reserved.
 #
@@ -23,41 +35,23 @@
 # THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-#
-# Authors: Steve Reinhardt
 
-import m5
 from m5.objects import *
-m5.util.addToPath('../configs/common')
+from m5.defines import buildEnv
+from base_config import *
+from arm_generic import *
+from common.cores.arm.O3_ARM_v7a import O3_ARM_v7a_3
+from gem5.isas import ISA
+from gem5.runtime import get_runtime_isa
 
-class MyCache(BaseCache):
-    assoc = 2
-    block_size = 64
-    hit_latency = 2
-    response_latency = 2
-    mshrs = 10
-    tgts_per_mshr = 5
-
-class MyL1Cache(MyCache):
-    is_top_level = True
-    tgts_per_mshr = 20
-
-cpu = DerivO3CPU(cpu_id=0)
-cpu.addTwoLevelCacheHierarchy(MyL1Cache(size = '128kB'),
-                              MyL1Cache(size = '256kB'),
-                              MyCache(size = '2MB'))
-# @todo Note that the L2 latency here is unmodified and 2 cycles,
-# should set hit latency and response latency to 20 cycles as for
-# other scripts
-cpu.clock = '2GHz'
-
-system = System(cpu = cpu,
-                physmem = SimpleMemory(),
-                membus = CoherentBus())
-system.system_port = system.membus.slave
-system.physmem.port = system.membus.master
-# create the interrupt controller
-cpu.createInterruptController()
-cpu.connectAllPorts(system.membus)
-
-root = Root(full_system = False, system = system)
+# If we are running ARM regressions, use a more sensible CPU
+# configuration. This makes the results more meaningful, and also
+# increases the coverage of the regressions.
+if get_runtime_isa() == ISA.ARM:
+    root = ArmSESystemUniprocessor(
+        mem_mode="timing", mem_class=DDR3_1600_8x8, cpu_class=O3_ARM_v7a_3
+    ).create_root()
+else:
+    root = BaseSESystemUniprocessor(
+        mem_mode="timing", mem_class=DDR3_1600_8x8, cpu_class=DerivO3CPU
+    ).create_root()

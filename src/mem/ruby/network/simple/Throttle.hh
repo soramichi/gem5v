@@ -1,4 +1,16 @@
 /*
+ * Copyright (c) 2021 ARM Limited
+ * All rights reserved
+ *
+ * The license below extends only to copyright in the software and shall
+ * not be construed as granting a license to any other intellectual
+ * property including but not limited to intellectual property relating
+ * to a hardware implementation of the functionality of the software
+ * licensed hereunder.  You may use the software subject to the license
+ * terms below provided that you ensure that this notice is replicated
+ * unmodified and in its entirety in all distributions of the software,
+ * modified or unmodified, in source code or in binary form.
+ *
  * Copyright (c) 1999-2008 Mark D. Hill and David A. Wood
  * All rights reserved.
  *
@@ -43,55 +55,62 @@
 #include <vector>
 
 #include "mem/ruby/common/Consumer.hh"
-#include "mem/ruby/common/Global.hh"
 #include "mem/ruby/network/Network.hh"
-#include "mem/ruby/system/System.hh"
+#include "mem/ruby/system/RubySystem.hh"
+
+namespace gem5
+{
+
+namespace ruby
+{
 
 class MessageBuffer;
+class Switch;
 
 class Throttle : public Consumer
 {
+  private:
+    Throttle(int sID, RubySystem *rs, NodeID node, Cycles link_latency,
+             int endpoint_bandwidth, Switch *em);
   public:
-    Throttle(int sID, NodeID node, int link_latency,
+    Throttle(int sID, RubySystem *rs, NodeID node, Cycles link_latency,
              int link_bandwidth_multiplier, int endpoint_bandwidth,
-             EventManager *em);
-    Throttle(NodeID node, int link_latency, int link_bandwidth_multiplier,
-             int endpoint_bandwidth, EventManager *em);
+             Switch *em);
+    Throttle(int sID, RubySystem *rs, NodeID node, Cycles link_latency,
+             const std::vector<int> &vnet_channels,
+             const std::vector<int> &vnet_bandwidth_multiplier,
+             int endpoint_bandwidth, Switch *em);
     ~Throttle() {}
 
     std::string name()
-    { return csprintf("Throttle-%i", m_sID); }
+    { return csprintf("Throttle-%i", m_switch_id); }
 
     void addLinks(const std::vector<MessageBuffer*>& in_vec,
-        const std::vector<MessageBuffer*>& out_vec);
+                  const std::vector<MessageBuffer*>& out_vec);
     void wakeup();
 
-    void printStats(std::ostream& out) const;
-    void clearStats();
-    // The average utilization (a percent) since last clearStats()
-    double getUtilization() const;
-    int
-    getLinkBandwidth() const
-    {
-        return m_endpoint_bandwidth * m_link_bandwidth_multiplier;
-    }
-    int getLatency() const { return m_link_latency; }
+    // The average utilization (a fraction) since last clearStats()
+    const statistics::Formula & getUtilization() const
+    { return throttleStats.link_utilization; }
+    const statistics::Vector & getMsgCount(unsigned int type) const
+    { return *(throttleStats.msg_counts[type]); }
 
-    const std::vector<std::vector<int> >&
-    getCounters() const
-    {
-        return m_message_counters;
-    }
+    int getLinkBandwidth(int vnet) const;
 
-    void clear();
+    int getTotalLinkBandwidth() const;
+
+    int getChannelCnt(int vnet) const;
+
+    Cycles getLatency() const { return m_link_latency; }
 
     void print(std::ostream& out) const;
 
   private:
-    void init(NodeID node, int link_latency, int link_bandwidth_multiplier,
+    void init(NodeID node, Cycles link_latency, int link_bandwidth_multiplier,
               int endpoint_bandwidth);
-    void addVirtualNetwork(MessageBuffer* in_ptr, MessageBuffer* out_ptr);
-    void linkUtilized(double ratio) { m_links_utilized += ratio; }
+    void operateVnet(int vnet, int channel, int &total_bw_remaining,
+                     bool &bw_saturated, bool &output_blocked,
+                     MessageBuffer *in, MessageBuffer *out);
 
     // Private copy constructor and assignment operator
     Throttle(const Throttle& obj);
@@ -99,19 +118,41 @@ class Throttle : public Consumer
 
     std::vector<MessageBuffer*> m_in;
     std::vector<MessageBuffer*> m_out;
-    std::vector<std::vector<int> > m_message_counters;
-    int m_vnets;
-    std::vector<int> m_units_remaining;
-    int m_sID;
+    unsigned int m_vnets;
+    std::vector<std::vector<int>> m_units_remaining;
+
+    const int m_switch_id;
+    Switch *m_switch;
     NodeID m_node;
-    int m_link_bandwidth_multiplier;
-    int m_link_latency;
+
+    bool m_physical_vnets;
+    std::vector<int> m_link_bandwidth_multiplier;
+    std::vector<int> m_vnet_channels;
+    Cycles m_link_latency;
     int m_wakeups_wo_switch;
     int m_endpoint_bandwidth;
+    RubySystem *m_ruby_system;
 
-    // For tracking utilization
-    Time m_ruby_start;
-    double m_links_utilized;
+    struct ThrottleStats : public statistics::Group
+    {
+        ThrottleStats(Switch *parent, const NodeID &nodeID);
+
+        // Statistical variables
+        statistics::Scalar acc_link_utilization;
+        statistics::Formula link_utilization;
+        statistics::Vector* msg_counts[MessageSizeType_NUM];
+        statistics::Formula* msg_bytes[MessageSizeType_NUM];
+
+        statistics::Scalar total_msg_count;
+        statistics::Scalar total_msg_bytes;
+        statistics::Scalar total_data_msg_bytes;
+        statistics::Scalar total_msg_wait_time;
+        statistics::Scalar total_stall_cy;
+        statistics::Scalar total_bw_sat_cy;
+        statistics::Formula avg_msg_wait_time;
+        statistics::Formula avg_bandwidth;
+        statistics::Formula avg_useful_bandwidth;
+    } throttleStats;
 };
 
 inline std::ostream&
@@ -121,5 +162,8 @@ operator<<(std::ostream& out, const Throttle& obj)
     out << std::flush;
     return out;
 }
+
+} // namespace ruby
+} // namespace gem5
 
 #endif // __MEM_RUBY_NETWORK_SIMPLE_THROTTLE_HH__

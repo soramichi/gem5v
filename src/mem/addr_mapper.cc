@@ -33,49 +33,36 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * Authors: Andreas Hansson
  */
 
 #include "mem/addr_mapper.hh"
 
-AddrMapper::AddrMapper(const AddrMapperParams* p)
-    : MemObject(p),
-      masterPort(name() + "-master", *this),
-      slavePort(name() + "-slave", *this)
+namespace gem5
+{
+
+AddrMapper::AddrMapper(const AddrMapperParams &p)
+    : SimObject(p),
+      memSidePort(name() + "-mem_side_port", *this),
+      cpuSidePort(name() + "-cpu_side_port", *this)
 {
 }
 
 void
 AddrMapper::init()
 {
-    if (!slavePort.isConnected() || !masterPort.isConnected())
+    if (!cpuSidePort.isConnected() || !memSidePort.isConnected())
         fatal("Address mapper is not connected on both sides.\n");
-
-    if ((slavePort.peerBlockSize() != masterPort.peerBlockSize()) &&
-        slavePort.peerBlockSize() && masterPort.peerBlockSize())
-        fatal("Slave port size %d, master port size %d \n "
-              "don't have the same block size... Not supported.\n",
-              slavePort.peerBlockSize(), masterPort.peerBlockSize());
 }
 
-BaseMasterPort&
-AddrMapper::getMasterPort(const std::string& if_name, PortID idx)
+Port &
+AddrMapper::getPort(const std::string &if_name, PortID idx)
 {
-    if (if_name == "master") {
-        return masterPort;
+    if (if_name == "mem_side_port") {
+        return memSidePort;
+    } else if (if_name == "cpu_side_port") {
+        return cpuSidePort;
     } else {
-        return MemObject::getMasterPort(if_name, idx);
-    }
-}
-
-BaseSlavePort&
-AddrMapper::getSlavePort(const std::string& if_name, PortID idx)
-{
-    if (if_name == "slave") {
-        return slavePort;
-    } else {
-        return MemObject::getSlavePort(if_name, idx);
+        return SimObject::getPort(if_name, idx);
     }
 }
 
@@ -84,7 +71,7 @@ AddrMapper::recvFunctional(PacketPtr pkt)
 {
     Addr orig_addr = pkt->getAddr();
     pkt->setAddr(remapAddr(orig_addr));
-    masterPort.sendFunctional(pkt);
+    memSidePort.sendFunctional(pkt);
     pkt->setAddr(orig_addr);
 }
 
@@ -93,7 +80,7 @@ AddrMapper::recvFunctionalSnoop(PacketPtr pkt)
 {
     Addr orig_addr = pkt->getAddr();
     pkt->setAddr(remapAddr(orig_addr));
-    slavePort.sendFunctionalSnoop(pkt);
+    cpuSidePort.sendFunctionalSnoop(pkt);
     pkt->setAddr(orig_addr);
 }
 
@@ -102,7 +89,7 @@ AddrMapper::recvAtomic(PacketPtr pkt)
 {
     Addr orig_addr = pkt->getAddr();
     pkt->setAddr(remapAddr(orig_addr));
-    Tick ret_tick =  masterPort.sendAtomic(pkt);
+    Tick ret_tick =  memSidePort.sendAtomic(pkt);
     pkt->setAddr(orig_addr);
     return ret_tick;
 }
@@ -112,7 +99,7 @@ AddrMapper::recvAtomicSnoop(PacketPtr pkt)
 {
     Addr orig_addr = pkt->getAddr();
     pkt->setAddr(remapAddr(orig_addr));
-    Tick ret_tick = slavePort.sendAtomicSnoop(pkt);
+    Tick ret_tick = cpuSidePort.sendAtomicSnoop(pkt);
     pkt->setAddr(orig_addr);
     return ret_tick;
 }
@@ -122,23 +109,24 @@ AddrMapper::recvTimingReq(PacketPtr pkt)
 {
     Addr orig_addr = pkt->getAddr();
     bool needsResponse = pkt->needsResponse();
-    bool memInhibitAsserted = pkt->memInhibitAsserted();
-    Packet::SenderState* senderState = pkt->senderState;
+    bool cacheResponding = pkt->cacheResponding();
 
-    if (needsResponse && !memInhibitAsserted) {
-        pkt->senderState = new AddrMapperSenderState(senderState, orig_addr);
+    if (needsResponse && !cacheResponding) {
+        pkt->pushSenderState(new AddrMapperSenderState(orig_addr));
     }
 
     pkt->setAddr(remapAddr(orig_addr));
 
-    // Attempt to send the packet (always succeeds for inhibited
-    // packets)
-    bool successful = masterPort.sendTimingReq(pkt);
+    // Attempt to send the packet
+    bool successful = memSidePort.sendTimingReq(pkt);
 
-    // If not successful, restore the sender state
-    if (!successful && needsResponse) {
-        delete pkt->senderState;
-        pkt->senderState = senderState;
+    // If not successful, restore the address and sender state
+    if (!successful) {
+        pkt->setAddr(orig_addr);
+
+        if (needsResponse) {
+            delete pkt->popSenderState();
+        }
     }
 
     return successful;
@@ -158,11 +146,11 @@ AddrMapper::recvTimingResp(PacketPtr pkt)
     Addr remapped_addr = pkt->getAddr();
 
     // Restore the state and address
-    pkt->senderState = receivedState->origSenderState;
+    pkt->senderState = receivedState->predecessor;
     pkt->setAddr(receivedState->origAddr);
 
     // Attempt to send the packet
-    bool successful = slavePort.sendTimingResp(pkt);
+    bool successful = cpuSidePort.sendTimingResp(pkt);
 
     // If packet successfully sent, delete the sender state, otherwise
     // restore state
@@ -180,57 +168,45 @@ AddrMapper::recvTimingResp(PacketPtr pkt)
 void
 AddrMapper::recvTimingSnoopReq(PacketPtr pkt)
 {
-    slavePort.sendTimingSnoopReq(pkt);
+    cpuSidePort.sendTimingSnoopReq(pkt);
 }
 
 bool
 AddrMapper::recvTimingSnoopResp(PacketPtr pkt)
 {
-    return masterPort.sendTimingSnoopResp(pkt);
+    return memSidePort.sendTimingSnoopResp(pkt);
 }
 
 bool
 AddrMapper::isSnooping() const
 {
-    if (slavePort.isSnooping())
+    if (cpuSidePort.isSnooping())
         fatal("AddrMapper doesn't support remapping of snooping requests\n");
     return false;
 }
 
-unsigned
-AddrMapper::deviceBlockSizeMaster()
+void
+AddrMapper::recvReqRetry()
 {
-    return slavePort.peerBlockSize();
-}
-
-unsigned
-AddrMapper::deviceBlockSizeSlave()
-{
-    return masterPort.peerBlockSize();
+    cpuSidePort.sendRetryReq();
 }
 
 void
-AddrMapper::recvRetryMaster()
+AddrMapper::recvRespRetry()
 {
-    slavePort.sendRetry();
-}
-
-void
-AddrMapper::recvRetrySlave()
-{
-    masterPort.sendRetry();
+    memSidePort.sendRetryResp();
 }
 
 void
 AddrMapper::recvRangeChange()
 {
-    slavePort.sendRangeChange();
+    cpuSidePort.sendRangeChange();
 }
 
-RangeAddrMapper::RangeAddrMapper(const RangeAddrMapperParams* p) :
+RangeAddrMapper::RangeAddrMapper(const RangeAddrMapperParams &p) :
     AddrMapper(p),
-    originalRanges(p->original_ranges),
-    remappedRanges(p->remapped_ranges)
+    originalRanges(p.original_ranges),
+    remappedRanges(p.remapped_ranges)
 {
     if (originalRanges.size() != remappedRanges.size())
         fatal("AddrMapper: original and shadowed range list must "
@@ -243,19 +219,13 @@ RangeAddrMapper::RangeAddrMapper(const RangeAddrMapperParams* p) :
     }
 }
 
-RangeAddrMapper*
-RangeAddrMapperParams::create()
-{
-    return new RangeAddrMapper(this);
-}
-
 Addr
 RangeAddrMapper::remapAddr(Addr addr) const
 {
     for (int i = 0; i < originalRanges.size(); ++i) {
-        if (originalRanges[i] == addr) {
-            Addr offset = addr - originalRanges[i].start;
-            return offset + remappedRanges[i].start;
+        if (originalRanges[i].contains(addr)) {
+            Addr offset = addr - originalRanges[i].start();
+            return offset + remappedRanges[i].start();
         }
     }
 
@@ -265,27 +235,9 @@ RangeAddrMapper::remapAddr(Addr addr) const
 AddrRangeList
 RangeAddrMapper::getAddrRanges() const
 {
-    AddrRangeList ranges;
-    AddrRangeList actualRanges = masterPort.getAddrRanges();
-
-    for (AddrRangeIter r = actualRanges.begin(); r != actualRanges.end(); ++r) {
-        AddrRange range = *r;
-
-        for (int j = 0; j < originalRanges.size(); ++j) {
-            if (range.intersects(originalRanges[j]))
-                fatal("Cannot remap range that intersects the original"
-                      " ranges but are not a subset.\n");
-            if (range.isSubset(originalRanges[j])) {
-                // range is a subset
-                Addr offset = range.start - originalRanges[j].start;
-                range.start -= offset;
-                range.end -= offset;
-            }
-            ranges.push_back(range);
-        }
-    }
-
+    // Simply return the original ranges as given by the parameters
+    AddrRangeList ranges(originalRanges.begin(), originalRanges.end());
     return ranges;
 }
 
-
+} // namespace gem5

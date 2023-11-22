@@ -1,4 +1,5 @@
 # Copyright (c) 2007 The Hewlett-Packard Development Company
+# Copyright (c) 2012-2013 AMD
 # All rights reserved.
 #
 # The license below extends only to copyright in the software and shall
@@ -32,13 +33,11 @@
 # THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-#
-# Authors: Gabe Black
 
-microcode = '''
+microcode = """
 def macroop LGDT_M
 {
-    .serializing
+    .serialize_after
     .adjust_env maxOsz
 
     # Get the limit
@@ -51,7 +50,7 @@ def macroop LGDT_M
 
 def macroop LGDT_P
 {
-    .serializing
+    .serialize_after
     .adjust_env maxOsz
 
     rdip t7
@@ -70,7 +69,7 @@ def macroop LGDT_P
 
 def macroop LGDT_16_M
 {
-    .serializing
+    .serialize_after
     .adjust_env maxOsz
 
     # Get the limit
@@ -78,13 +77,13 @@ def macroop LGDT_16_M
     # Get the base
     ld t2, seg, sib, 'adjustedDisp + 2', dataSize=4
     zexti t2, t2, 23, dataSize=8
-    wrbase tsg, t2
+    wrbase tsg, t2, dataSize=8
     wrlimit tsg, t1
 };
 
 def macroop LGDT_16_P
 {
-    .serializing
+    .serialize_after
     .adjust_env maxOsz
 
     rdip t7
@@ -99,7 +98,7 @@ def macroop LGDT_16_P
 
 def macroop LIDT_M
 {
-    .serializing
+    .serialize_after
     .adjust_env maxOsz
 
     # Get the limit
@@ -112,7 +111,7 @@ def macroop LIDT_M
 
 def macroop LIDT_P
 {
-    .serializing
+    .serialize_after
     .adjust_env maxOsz
 
     rdip t7
@@ -131,7 +130,7 @@ def macroop LIDT_P
 
 def macroop LIDT_16_M
 {
-    .serializing
+    .serialize_after
     .adjust_env maxOsz
 
     # Get the limit
@@ -139,13 +138,13 @@ def macroop LIDT_16_M
     # Get the base
     ld t2, seg, sib, 'adjustedDisp + 2', dataSize=4
     zexti t2, t2, 23, dataSize=8
-    wrbase idtr, t2
+    wrbase idtr, t2, dataSize=8
     wrlimit idtr, t1
 };
 
 def macroop LIDT_16_P
 {
-    .serializing
+    .serialize_after
     .adjust_env maxOsz
 
     rdip t7
@@ -158,9 +157,9 @@ def macroop LIDT_16_P
     wrlimit idtr, t1
 };
 
-def macroop LTR_R
+def macroop LTR_64_R
 {
-    .serializing
+    .serialize_after
     chks reg, t0, TRCheck
     limm t4, 0, dataSize=8
     srli t4, reg, 3, dataSize=2
@@ -175,9 +174,9 @@ def macroop LTR_R
     st t1, tsg, [8, t4, t0], dataSize=8
 };
 
-def macroop LTR_M
+def macroop LTR_64_M
 {
-    .serializing
+    .serialize_after
     ld t5, seg, sib, disp, dataSize=2
     chks t5, t0, TRCheck
     limm t4, 0, dataSize=8
@@ -193,9 +192,9 @@ def macroop LTR_M
     st t1, tsg, [8, t4, t0], dataSize=8
 };
 
-def macroop LTR_P
+def macroop LTR_64_P
 {
-    .serializing
+    .serialize_after
     rdip t7
     ld t5, seg, riprel, disp, dataSize=2
     chks t5, t0, TRCheck
@@ -212,14 +211,48 @@ def macroop LTR_P
     st t1, tsg, [8, t4, t0], dataSize=8
 };
 
-def macroop LLDT_R
+def macroop LTR_R
 {
-    .serializing
+    .serialize_after
+    chks reg, t0, TRCheck
+    limm t4, 0, dataSize=8
+    srli t4, reg, 3, dataSize=2
+    ldst t1, tsg, [8, t4, t0], dataSize=8
+    chks reg, t1, TSSCheck
+    wrdl tr, t1, reg
+    limm t5, (1 << 9)
+    or t1, t1, t5
+    st t1, tsg, [8, t4, t0], dataSize=8
+};
+
+def macroop LTR_M
+{
+    .serialize_after
+    ld t5, seg, sib, disp, dataSize=2
+    chks t5, t0, TRCheck
+    limm t4, 0, dataSize=8
+    srli t4, t5, 3, dataSize=2
+    ldst t1, tsg, [8, t4, t0], dataSize=8
+    chks t5, t1, TSSCheck
+    wrdl tr, t1, t5
+    limm t5, (1 << 9)
+    or t1, t1, t5
+    st t1, tsg, [8, t4, t0], dataSize=8
+};
+
+def macroop LTR_P
+{
+    panic "LTR in non-64 bit mode doesn't support RIP addressing."
+};
+
+def macroop LLDT_64_R
+{
+    .serialize_after
     chks reg, t0, InGDTCheck, flags=(EZF,)
     br label("end"), flags=(CEZF,)
     limm t4, 0, dataSize=8
     srli t4, reg, 3, dataSize=2
-    ldst t1, tsg, [8, t4, t0], dataSize=8
+    ld t1, tsg, [8, t4, t0], dataSize=8
     ld t2, tsg, [8, t4, t0], 8, dataSize=8
     chks reg, t1, LDTCheck
     wrdh t3, t1, t2
@@ -229,15 +262,15 @@ end:
     fault "NoFault"
 };
 
-def macroop LLDT_M
+def macroop LLDT_64_M
 {
-    .serializing
+    .serialize_after
     ld t5, seg, sib, disp, dataSize=2
     chks t5, t0, InGDTCheck, flags=(EZF,)
     br label("end"), flags=(CEZF,)
     limm t4, 0, dataSize=8
     srli t4, t5, 3, dataSize=2
-    ldst t1, tsg, [8, t4, t0], dataSize=8
+    ld t1, tsg, [8, t4, t0], dataSize=8
     ld t2, tsg, [8, t4, t0], 8, dataSize=8
     chks t5, t1, LDTCheck
     wrdh t3, t1, t2
@@ -247,16 +280,16 @@ end:
     fault "NoFault"
 };
 
-def macroop LLDT_P
+def macroop LLDT_64_P
 {
-    .serializing
+    .serialize_after
     rdip t7
     ld t5, seg, riprel, disp, dataSize=2
     chks t5, t0, InGDTCheck, flags=(EZF,)
     br label("end"), flags=(CEZF,)
     limm t4, 0, dataSize=8
     srli t4, t5, 3, dataSize=2
-    ldst t1, tsg, [8, t4, t0], dataSize=8
+    ld t1, tsg, [8, t4, t0], dataSize=8
     ld t2, tsg, [8, t4, t0], 8, dataSize=8
     chks t5, t1, LDTCheck
     wrdh t3, t1, t2
@@ -264,6 +297,40 @@ def macroop LLDT_P
     wrbase tsl, t3, dataSize=8
 end:
     fault "NoFault"
+};
+
+def macroop LLDT_R
+{
+    .serialize_after
+    chks reg, t0, InGDTCheck, flags=(EZF,)
+    br label("end"), flags=(CEZF,)
+    limm t4, 0, dataSize=8
+    srli t4, reg, 3, dataSize=2
+    ld t1, tsg, [8, t4, t0], dataSize=8
+    chks reg, t1, LDTCheck
+    wrdl tsl, t1, reg
+end:
+    fault "NoFault"
+};
+
+def macroop LLDT_M
+{
+    .serialize_after
+    ld t5, seg, sib, disp, dataSize=2
+    chks t5, t0, InGDTCheck, flags=(EZF,)
+    br label("end"), flags=(CEZF,)
+    limm t4, 0, dataSize=8
+    srli t4, t5, 3, dataSize=2
+    ld t1, tsg, [8, t4, t0], dataSize=8
+    chks t5, t1, LDTCheck
+    wrdl tsl, t1, t5
+end:
+    fault "NoFault"
+};
+
+def macroop LLDT_P
+{
+    panic "LLDT in non-64 bit mode doesn't support RIP addressing."
 };
 
 def macroop SWAPGS
@@ -273,4 +340,4 @@ def macroop SWAPGS
     wrbase gs, t1, dataSize=8
     wrval kernel_gs_base, t2, dataSize=8
 };
-'''
+"""

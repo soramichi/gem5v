@@ -1,4 +1,16 @@
 /*
+ * Copyright (c) 2021 ARM Limited
+ * All rights reserved.
+ *
+ * The license below extends only to copyright in the software and shall
+ * not be construed as granting a license to any other intellectual
+ * property including but not limited to intellectual property relating
+ * to a hardware implementation of the functionality of the software
+ * licensed hereunder.  You may use the software subject to the license
+ * terms below provided that you ensure that this notice is replicated
+ * unmodified and in its entirety in all distributions of the software,
+ * modified or unmodified, in source code or in binary form.
+ *
  * Copyright (c) 1999-2008 Mark D. Hill and David A. Wood
  * All rights reserved.
  *
@@ -30,36 +42,43 @@
 #define __MEM_RUBY_SLICC_INTERFACE_MESSAGE_HH__
 
 #include <iostream>
+#include <memory>
+#include <stack>
 
-#include "base/refcnt.hh"
-#include "mem/ruby/common/Global.hh"
-#include "mem/ruby/common/TypeDefines.hh"
-#include "mem/ruby/system/System.hh"
+#include "mem/packet.hh"
+#include "mem/ruby/common/NetDest.hh"
+#include "mem/ruby/common/WriteMask.hh"
+#include "mem/ruby/protocol/MessageSizeType.hh"
+
+namespace gem5
+{
+
+namespace ruby
+{
 
 class Message;
-typedef RefCountingPtr<Message> MsgPtr;
+typedef std::shared_ptr<Message> MsgPtr;
 
-class Message : public RefCounted
+class Message
 {
   public:
-    Message()
-        : m_time(g_system_ptr->getTime()),
-          m_LastEnqueueTime(g_system_ptr->getTime()),
-          m_DelayedCycles(0)
+    Message(Tick curTime)
+        : m_time(curTime),
+          m_LastEnqueueTime(curTime),
+          m_DelayedTicks(0), m_msg_counter(0)
     { }
 
-    Message(const Message &other)
-        : m_time(other.m_time),
-          m_LastEnqueueTime(other.m_LastEnqueueTime),
-          m_DelayedCycles(other.m_DelayedCycles)
-    { }
+    Message(const Message &other) = default;
 
     virtual ~Message() { }
 
-    virtual Message* clone() const = 0;
+    virtual MsgPtr clone() const = 0;
     virtual void print(std::ostream& out) const = 0;
-    virtual void setIncomingLink(int) {}
-    virtual void setVnet(int) {}
+
+    virtual const MessageSizeType& getMessageSize() const
+    { panic("MessageSizeType() called on wrong message!"); }
+    virtual MessageSizeType& getMessageSize()
+    { panic("MessageSizeType() called on wrong message!"); }
 
     /**
      * The two functions below are used for reading / writing the message
@@ -68,26 +87,62 @@ class Message : public RefCounted
      * class that can be potentially searched for the address needs to
      * implement these methods.
      */
-    virtual bool functionalRead(Packet *pkt) = 0;
-    //{ fatal("Read functional access not implemented!"); }
-    virtual bool functionalWrite(Packet *pkt) = 0;
-    //{ fatal("Write functional access not implemented!"); }
+    virtual bool functionalRead(Packet *pkt)
+    { panic("functionalRead(Packet) not implemented"); }
+    virtual bool functionalRead(Packet *pkt, WriteMask &mask)
+    { panic("functionalRead(Packet,WriteMask) not implemented"); }
+    virtual bool functionalWrite(Packet *pkt)
+    { panic("functionalWrite(Packet) not implemented"); }
 
-    void setDelayedCycles(const int& cycles) { m_DelayedCycles = cycles; }
-    const int& getDelayedCycles() const {return m_DelayedCycles;}
-    int& getDelayedCycles() {return m_DelayedCycles;}
-    void setLastEnqueueTime(const Time& time) { m_LastEnqueueTime = time; }
-    const Time& getLastEnqueueTime() const {return m_LastEnqueueTime;}
-    Time& getLastEnqueueTime() {return m_LastEnqueueTime;}
+    //! Update the delay this message has experienced so far.
+    void updateDelayedTicks(Tick curTime)
+    {
+        assert(m_LastEnqueueTime <= curTime);
+        Tick delta = curTime - m_LastEnqueueTime;
+        m_DelayedTicks += delta;
+    }
+    Tick getDelayedTicks() const {return m_DelayedTicks;}
 
-    const Time& getTime() const { return m_time; }
-    void setTime(const Time& new_time) { m_time = new_time; }
+    void setLastEnqueueTime(const Tick& time) { m_LastEnqueueTime = time; }
+    Tick getLastEnqueueTime() const {return m_LastEnqueueTime;}
+
+    Tick getTime() const { return m_time; }
+    void setMsgCounter(uint64_t c) { m_msg_counter = c; }
+    uint64_t getMsgCounter() const { return m_msg_counter; }
+
+    // Functions related to network traversal
+    virtual const NetDest& getDestination() const
+    { panic("getDestination() called on wrong message!"); }
+    virtual NetDest& getDestination()
+    { panic("getDestination() called on wrong message!"); }
+
+    int getIncomingLink() const { return incoming_link; }
+    void setIncomingLink(int link) { incoming_link = link; }
+    int getVnet() const { return vnet; }
+    void setVnet(int net) { vnet = net; }
 
   private:
-    Time m_time;
-    Time m_LastEnqueueTime; // my last enqueue time
-    int m_DelayedCycles; // my delayed cycles
+    Tick m_time;
+    Tick m_LastEnqueueTime; // my last enqueue time
+    Tick m_DelayedTicks; // my delayed cycles
+    uint64_t m_msg_counter; // FIXME, should this be a 64-bit value?
+
+    // Variables for required network traversal
+    int incoming_link;
+    int vnet;
 };
+
+inline bool
+operator>(const MsgPtr &lhs, const MsgPtr &rhs)
+{
+    const Message *l = lhs.get();
+    const Message *r = rhs.get();
+
+    if (l->getLastEnqueueTime() == r->getLastEnqueueTime()) {
+        return l->getMsgCounter() > r->getMsgCounter();
+    }
+    return l->getLastEnqueueTime() > r->getLastEnqueueTime();
+}
 
 inline std::ostream&
 operator<<(std::ostream& out, const Message& obj)
@@ -96,5 +151,8 @@ operator<<(std::ostream& out, const Message& obj)
     out << std::flush;
     return out;
 }
+
+} // namespace ruby
+} // namespace gem5
 
 #endif // __MEM_RUBY_SLICC_INTERFACE_MESSAGE_HH__

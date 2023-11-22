@@ -1,4 +1,16 @@
 /*
+ * Copyright (c) 2012-2014,2018, 2021 Arm Limited
+ * All rights reserved
+ *
+ * The license below extends only to copyright in the software and shall
+ * not be construed as granting a license to any other intellectual
+ * property including but not limited to intellectual property relating
+ * to a hardware implementation of the functionality of the software
+ * licensed hereunder.  You may use the software subject to the license
+ * terms below provided that you ensure that this notice is replicated
+ * unmodified and in its entirety in all distributions of the software,
+ * modified or unmodified, in source code or in binary form.
+ *
  * Copyright (c) 2012 Google
  * All rights reserved.
  *
@@ -24,21 +36,58 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * Authors: Gabe Black
  */
 
 #include "arch/arm/decoder.hh"
-#include "arch/arm/isa_traits.hh"
+
+#include "arch/arm/isa.hh"
 #include "arch/arm/utility.hh"
+#include "base/cast.hh"
 #include "base/trace.hh"
-#include "cpu/thread_context.hh"
 #include "debug/Decoder.hh"
+#include "sim/full_system.hh"
+
+namespace gem5
+{
 
 namespace ArmISA
 {
 
-GenericISA::BasicDecodeCache Decoder::defaultCache;
+GenericISA::BasicDecodeCache<Decoder, ExtMachInst> Decoder::defaultCache;
+
+Decoder::Decoder(const ArmDecoderParams &params)
+    : InstDecoder(params, &data),
+      dvmEnabled(params.dvm_enabled),
+      data(0), fpscrLen(0), fpscrStride(0),
+      decoderFlavor(safe_cast<ISA *>(params.isa)->decoderFlavor())
+{
+    reset();
+
+    // Initialize SVE vector length
+    sveLen = (safe_cast<ISA *>(params.isa)->
+            getCurSveVecLenInBitsAtReset() >> 7) - 1;
+
+    // Initialize SME vector length
+    smeLen = (safe_cast<ISA *>(params.isa)
+            ->getCurSmeVecLenInBitsAtReset() >> 7) - 1;
+
+    if (dvmEnabled) {
+        warn_once(
+            "DVM Ops instructions are micro-architecturally "
+            "modelled as loads. This will tamper the effective "
+            "number of loads stat\n");
+    }
+}
+
+void
+Decoder::reset()
+{
+    InstDecoder::reset();
+    bigThumb = false;
+    offset = 0;
+    emi = 0;
+    foundIt = false;
+}
 
 void
 Decoder::process()
@@ -48,9 +97,11 @@ Decoder::process()
 
     if (!emi.thumb) {
         emi.instBits = data;
-        emi.sevenAndFour = bits(data, 7) && bits(data, 4);
-        emi.isMisc = (bits(data, 24, 23) == 0x2 &&
-                      bits(data, 20) == 0);
+        if (!emi.aarch64) {
+            emi.sevenAndFour = bits(data, 7) && bits(data, 4);
+            emi.isMisc = (bits(data, 24, 23) == 0x2 &&
+                          bits(data, 20) == 0);
+        }
         consumeBytes(4);
         DPRINTF(Decoder, "Arm inst: %#x.\n", (uint64_t)emi);
     } else {
@@ -105,20 +156,60 @@ Decoder::process()
     }
 }
 
-//Use this to give data to the decoder. This should be used
-//when there is control flow.
 void
-Decoder::moreBytes(const PCState &pc, Addr fetchPC, MachInst inst)
+Decoder::consumeBytes(int numBytes)
 {
-    data = inst;
+    offset += numBytes;
+    assert(offset <= sizeof(data) || emi.decoderFault);
+    if (offset == sizeof(data))
+        outOfBytes = true;
+}
+
+void
+Decoder::moreBytes(const PCStateBase &_pc, Addr fetchPC)
+{
+    auto &pc = _pc.as<PCState>();
+    data = letoh(data);
     offset = (fetchPC >= pc.instAddr()) ? 0 : pc.instAddr() - fetchPC;
     emi.thumb = pc.thumb();
-    FPSCR fpscr = tc->readMiscReg(MISCREG_FPSCR);
-    emi.fpscrLen = fpscr.len;
-    emi.fpscrStride = fpscr.stride;
+    emi.aarch64 = pc.aarch64();
+    emi.fpscrLen = fpscrLen;
+    emi.fpscrStride = fpscrStride;
+    emi.sveLen = sveLen;
+
+    const Addr alignment(pc.thumb() ? 0x1 : 0x3);
+    emi.decoderFault = static_cast<uint8_t>(
+        pc.instAddr() & alignment ? DecoderFault::UNALIGNED : DecoderFault::OK);
 
     outOfBytes = false;
     process();
 }
 
+StaticInstPtr
+Decoder::decode(PCStateBase &_pc)
+{
+    if (!instDone)
+        return NULL;
+
+    auto &pc = _pc.as<PCState>();
+
+    const int inst_size((!emi.thumb || emi.bigThumb) ? 4 : 2);
+    ExtMachInst this_emi(emi);
+
+    pc.npc(pc.pc() + inst_size);
+    if (foundIt)
+        pc.nextItstate(itBits);
+    this_emi.itstate = pc.itstate();
+    this_emi.illegalExecution = pc.illegalExec() ? 1 : 0;
+    this_emi.debugStep = pc.debugStep() ? 1 : 0;
+    pc.size(inst_size);
+
+    emi = 0;
+    instDone = false;
+    foundIt = false;
+
+    return decode(this_emi, pc.instAddr());
 }
+
+} // namespace ArmISA
+} // namespace gem5

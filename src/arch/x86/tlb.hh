@@ -33,29 +33,25 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * Authors: Gabe Black
  */
 
 #ifndef __ARCH_X86_TLB_HH__
 #define __ARCH_X86_TLB_HH__
 
 #include <list>
-#include <string>
 #include <vector>
 
-#include "arch/x86/regs/segment.hh"
+#include "arch/generic/tlb.hh"
 #include "arch/x86/pagetable.hh"
 #include "base/trie.hh"
-#include "mem/mem_object.hh"
 #include "mem/request.hh"
 #include "params/X86TLB.hh"
-#include "sim/fault_fwd.hh"
-#include "sim/sim_object.hh"
-#include "sim/tlb.hh"
+#include "sim/stats.hh"
+
+namespace gem5
+{
 
 class ThreadContext;
-class Packet;
 
 namespace X86ISA
 {
@@ -73,13 +69,18 @@ namespace X86ISA
       public:
 
         typedef X86TLBParams Params;
-        TLB(const Params *p);
+        TLB(const Params &p);
 
-        void dumpAll();
+        void takeOverFrom(BaseTLB *otlb) override {}
 
         TlbEntry *lookup(Addr va, bool update_lru = true);
 
         void setConfigAddress(uint32_t addr);
+        //concatenate Page Addr and pcid
+        inline Addr concAddrPcid(Addr vpn, uint64_t pcid)
+        {
+          return (vpn | pcid);
+        }
 
       protected:
 
@@ -90,27 +91,38 @@ namespace X86ISA
       public:
         Walker *getWalker();
 
-        void invalidateAll();
+        void flushAll() override;
 
-        void invalidateNonGlobal();
+        void flushNonGlobal();
 
-        void demapPage(Addr va, uint64_t asn);
+        void demapPage(Addr va, uint64_t asn) override;
 
       protected:
-        int size;
+        uint32_t size;
 
-        TlbEntry * tlb;
+        std::vector<TlbEntry> tlb;
 
         EntryList freeList;
-        EntryList entryList;
 
         TlbEntryTrie trie;
         uint64_t lruSeq;
 
-        Fault translateInt(RequestPtr req, ThreadContext *tc);
+        AddrRange m5opRange;
 
-        Fault translate(RequestPtr req, ThreadContext *tc,
-                Translation *translation, Mode mode,
+        struct TlbStats : public statistics::Group
+        {
+            TlbStats(statistics::Group *parent);
+
+            statistics::Scalar rdAccesses;
+            statistics::Scalar wrAccesses;
+            statistics::Scalar rdMisses;
+            statistics::Scalar wrMisses;
+        } stats;
+
+        Fault translateInt(bool read, RequestPtr req, ThreadContext *tc);
+
+        Fault translate(const RequestPtr &req, ThreadContext *tc,
+                BaseMMU::Translation *translation, BaseMMU::Mode mode,
                 bool &delayedResponse, bool timing);
 
       public:
@@ -123,32 +135,52 @@ namespace X86ISA
             return ++lruSeq;
         }
 
-        Fault translateAtomic(RequestPtr req, ThreadContext *tc, Mode mode);
-        void translateTiming(RequestPtr req, ThreadContext *tc,
-                Translation *translation, Mode mode);
-        /** Stub function for compilation support of CheckerCPU. x86 ISA does
-         *  not support Checker model at the moment
-         */
-        Fault translateFunctional(RequestPtr req, ThreadContext *tc, Mode mode);
-
-        TlbEntry * insert(Addr vpn, TlbEntry &entry);
-
-        // Checkpointing
-        virtual void serialize(std::ostream &os);
-        virtual void unserialize(Checkpoint *cp, const std::string &section);
+        Fault translateAtomic(
+            const RequestPtr &req, ThreadContext *tc,
+            BaseMMU::Mode mode) override;
+        Fault translateFunctional(
+            const RequestPtr &req, ThreadContext *tc,
+            BaseMMU::Mode mode) override;
+        void translateTiming(
+            const RequestPtr &req, ThreadContext *tc,
+            BaseMMU::Translation *translation, BaseMMU::Mode mode) override;
 
         /**
-         * Get the table walker master port. This is used for
+         * Do post-translation physical address finalization.
+         *
+         * Some addresses, for example requests going to the APIC,
+         * need post-translation updates. Such physical addresses are
+         * remapped into a "magic" part of the physical address space
+         * by this method.
+         *
+         * @param req Request to updated in-place.
+         * @param tc Thread context that created the request.
+         * @param mode Request type (read/write/execute).
+         * @return A fault on failure, NoFault otherwise.
+         */
+        Fault finalizePhysical(const RequestPtr &req, ThreadContext *tc,
+                               BaseMMU::Mode mode) const override;
+
+        TlbEntry *insert(Addr vpn, const TlbEntry &entry, uint64_t pcid);
+
+        // Checkpointing
+        void serialize(CheckpointOut &cp) const override;
+        void unserialize(CheckpointIn &cp) override;
+
+        /**
+         * Get the table walker port. This is used for
          * migrating port connections during a CPU takeOverFrom()
          * call. For architectures that do not have a table walker,
          * NULL is returned, hence the use of a pointer rather than a
          * reference. For X86 this method will always return a valid
          * port pointer.
          *
-         * @return A pointer to the walker master port
+         * @return A pointer to the walker port
          */
-        virtual BaseMasterPort *getMasterPort();
+        Port *getTableWalkerPort() override;
     };
-}
+
+} // namespace X86ISA
+} // namespace gem5
 
 #endif // __ARCH_X86_TLB_HH__

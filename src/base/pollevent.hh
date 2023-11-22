@@ -24,23 +24,23 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * Authors: Nathan Binkert
  */
 
-#ifndef __POLLEVENT_H__
-#define __POLLEVENT_H__
+#ifndef __BASE_POLLEVENT_HH__
+#define __BASE_POLLEVENT_HH__
 
 #include <poll.h>
 
 #include <vector>
 
-#include "sim/core.hh"
+#include "sim/serialize.hh"
 
-class Checkpoint;
+namespace gem5
+{
+
 class PollQueue;
 
-class PollEvent
+class PollEvent : public Serializable
 {
   private:
     friend class PollQueue;
@@ -51,17 +51,28 @@ class PollEvent
     bool enabled;
 
   public:
+    /**
+     * @ingroup api_poll_event
+     */
     PollEvent(int fd, int event);
     virtual ~PollEvent();
 
+    /**
+     * @ingroup api_poll_event
+     * @{
+     */
     void disable();
     void enable();
     virtual void process(int revent) = 0;
+    /** @} */ // end of api_poll_event
 
+    /**
+     * @ingroup api_poll_event
+     */
     bool queued() { return queue != 0; }
 
-    virtual void serialize(std::ostream &os);
-    virtual void unserialize(Checkpoint *cp, const std::string &section);
+    void serialize(CheckpointOut &cp) const override;
+    void unserialize(CheckpointIn &cp) override;
 };
 
 class PollQueue
@@ -75,27 +86,32 @@ class PollQueue
     int num_fds;
 
   public:
+    /**
+     * @ingroup api_poll_queue
+     */
     PollQueue();
     ~PollQueue();
 
+    /**
+     * @ingroup api_poll_queue
+     * @{
+     */
     void copy();
     void remove(PollEvent *event);
     void schedule(PollEvent *event);
     void service();
+    /** @} */ // end of api_poll_queue
 
-  protected:
-    static bool handler;
-    static struct sigaction oldio;
-    static struct sigaction oldalrm;
 
   public:
     static void setupAsyncIO(int fd, bool set);
-    static void handleIO(int);
-    static void handleALRM(int);
-    static void removeHandler();
-    static void setupHandler();
 };
 
+/**
+ * @ingroup api_poll_queue
+ */
 extern PollQueue pollQueue;
 
-#endif // __POLLEVENT_H__
+} // namespace gem5
+
+#endif // __BASE_POLLEVENT_HH__

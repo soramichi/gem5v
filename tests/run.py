@@ -1,3 +1,15 @@
+# Copyright (c) 2012 ARM Limited
+# All rights reserved
+#
+# The license below extends only to copyright in the software and shall
+# not be construed as granting a license to any other intellectual
+# property including but not limited to intellectual property relating
+# to a hardware implementation of the functionality of the software
+# licensed hereunder.  You may use the software subject to the license
+# terms below provided that you ensure that this notice is replicated
+# unmodified and in its entirety in all distributions of the software,
+# modified or unmodified, in source code or in binary form.
+#
 # Copyright (c) 2006-2007 The Regents of The University of Michigan
 # All rights reserved.
 #
@@ -23,8 +35,6 @@
 # THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-#
-# Authors: Steve Reinhardt
 
 import os
 import sys
@@ -32,42 +42,183 @@ import re
 import string
 
 from os.path import join as joinpath
+import os.path
+import os
 
 import m5
+
+
+def skip_test(reason=""):
+    """Signal that a test should be skipped and optionally print why.
+
+    Keyword arguments:
+      reason -- Reason why the test failed. Output is omitted if empty.
+    """
+
+    if reason:
+        print(f"Skipping test: {reason}")
+    sys.exit(2)
+
+
+def has_sim_object(name):
+    """Test if a SimObject exists in the simulator.
+
+    Arguments:
+      name -- Name of SimObject (string)
+
+    Returns: True if the object exists, False otherwise.
+    """
+
+    try:
+        cls = getattr(m5.objects, name)
+        return issubclass(cls, m5.objects.SimObject)
+    except AttributeError:
+        return False
+
+
+def require_sim_object(name, fatal=False):
+    """Test if a SimObject exists and abort/skip test if not.
+
+    Arguments:
+      name -- Name of SimObject (string)
+
+    Keyword arguments:
+      fatal -- Set to True to indicate that the test should fail
+               instead of being skipped.
+    """
+
+    if has_sim_object(name):
+        return
+    else:
+        msg = f"Test requires the '{name}' SimObject."
+        if fatal:
+            m5.fatal(msg)
+        else:
+            skip_test(msg)
+
+
+def require_file(path, fatal=False, mode=os.F_OK):
+    """Test if a file exists and abort/skip test if not.
+
+    Arguments:
+      path -- File to test for.
+
+    Keyword arguments:
+      fatal -- Set to True to indicate that the test should fail
+               instead of being skipped.
+      modes -- Mode to test for, default to existence. See the
+               Python documentation for os.access().
+    """
+
+    if os.access(path, mode):
+        return
+    else:
+        msg = f"Test requires '{path}'"
+        if not os.path.exists(path):
+            msg += " which does not exist."
+        else:
+            msg += " which has incorrect permissions."
+
+        if fatal:
+            m5.fatal(msg)
+        else:
+            skip_test(msg)
+
+
+def require_kvm(kvm_dev="/dev/kvm", fatal=False):
+    """Test if KVM is available.
+
+    Keyword arguments:
+      kvm_dev -- Device to test (normally /dev/kvm)
+      fatal -- Set to True to indicate that the test should fail
+               instead of being skipped.
+    """
+
+    require_sim_object("BaseKvmCPU", fatal=fatal)
+    require_file(kvm_dev, fatal=fatal, mode=os.R_OK | os.W_OK)
+
+
+def run_test(root):
+    """Default run_test implementations. Scripts can override it."""
+
+    # instantiate configuration
+    m5.instantiate()
+
+    # simulate until program terminates
+    exit_event = m5.simulate(maxtick)
+    print("Exiting @ tick", m5.curTick(), "because", exit_event.getCause())
+
 
 # Since we're in batch mode, dont allow tcp socket connections
 m5.disableAllListeners()
 
 # single "path" arg encodes everything we need to know about test
-(category, mode, name, isa, opsys, config) = sys.argv[1].split('/')[-6:]
+(category, mode, name, isa, opsys, config) = sys.argv[1].split("/")[-6:]
 
 # find path to directory containing this file
 tests_root = os.path.dirname(__file__)
-test_progs = os.environ.get('M5_TEST_PROGS', '/dist/m5/regression/test-progs')
+test_progs = os.environ.get("M5_TEST_PROGS", "/dist/m5/regression/test-progs")
 if not os.path.isdir(test_progs):
-    test_progs = joinpath(tests_root, 'test-progs')
+    test_progs = joinpath(tests_root, "test-progs")
 
 # generate path to binary file
 def binpath(app, file=None):
     # executable has same name as app unless specified otherwise
     if not file:
         file = app
-    return joinpath(test_progs, app, 'bin', isa, opsys, file)
+    return joinpath(test_progs, app, "bin", isa, opsys, file)
+
 
 # generate path to input file
 def inputpath(app, file=None):
     # input file has same name as app unless specified otherwise
     if not file:
         file = app
-    return joinpath(test_progs, app, 'input', file)
+    return joinpath(test_progs, app, "input", file)
+
+
+def srcpath(path):
+    """Path to file in gem5's source tree"""
+    return joinpath(os.path.dirname(__file__), "..", path)
+
+
+def run_config(config, argv=None):
+    """Execute a configuration script that is external to the test system"""
+
+    src_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../"))
+    abs_path = joinpath(src_root, config)
+
+    code = compile(open(abs_path, "r").read(), abs_path, "exec")
+    scope = {"__file__": config, "__name__": "__m5_main__"}
+
+    # Set the working directory in case we are executing from
+    # outside gem5's source tree
+    os.chdir(src_root)
+
+    # gem5 normally adds the script's directory to the path to make
+    # script-relative imports work.
+    sys.path = [os.path.dirname(abs_path)] + sys.path
+
+    if argv is None:
+        sys.argv = [config]
+    else:
+        sys.argv = argv
+    exec(code, scope)
+
 
 # build configuration
-sys.path.append(joinpath(tests_root, 'configs'))
+sys.path.append(joinpath(tests_root, "configs"))
 test_filename = config
 # for ruby configurations, remove the protocol name from the test filename
-if re.search('-ruby', test_filename):
-    test_filename = test_filename.split('-ruby')[0]+'-ruby'
-execfile(joinpath(tests_root, 'configs', test_filename + '.py'))
+if re.search("-ruby", test_filename):
+    test_filename = test_filename.split("-ruby")[0] + "-ruby"
+exec(
+    compile(
+        open(joinpath(tests_root, "configs", test_filename + ".py")).read(),
+        joinpath(tests_root, "configs", test_filename + ".py"),
+        "exec",
+    )
+)
 
 # set default maxtick... script can override
 # -1 means run forever
@@ -75,12 +226,40 @@ maxtick = m5.MaxTick
 
 # tweak configuration for specific test
 sys.path.append(joinpath(tests_root, category, mode, name))
-execfile(joinpath(tests_root, category, mode, name, 'test.py'))
+exec(
+    compile(
+        open(joinpath(tests_root, category, mode, name, "test.py")).read(),
+        joinpath(tests_root, category, mode, name, "test.py"),
+        "exec",
+    )
+)
 
-# instantiate configuration
-m5.instantiate()
+# Initialize all CPUs in a system
+def initCPUs(sys):
+    def initCPU(cpu):
+        # We might actually have a MemTest object or something similar
+        # here that just pretends to be a CPU.
+        try:
+            cpu.createThreads()
+        except:
+            pass
 
-# simulate until program terminates
-exit_event = m5.simulate(maxtick)
+    # The CPU attribute doesn't exist in some cases, e.g. the Ruby
+    # testers.
+    if not hasattr(sys, "cpu"):
+        return
 
-print 'Exiting @ tick', m5.curTick(), 'because', exit_event.getCause()
+    # The CPU can either be a list of CPUs or a single object.
+    if isinstance(sys.cpu, list):
+        [initCPU(cpu) for cpu in sys.cpu]
+    else:
+        initCPU(sys.cpu)
+
+
+# We might be creating a single system or a dual system. Try
+# initializing the CPUs in all known system attributes.
+for sysattr in ["system", "testsys", "drivesys"]:
+    if hasattr(root, sysattr):
+        initCPUs(getattr(root, sysattr))
+
+run_test(root)

@@ -1,4 +1,16 @@
 /*
+ * Copyright (c) 2012, 2017 ARM Limited
+ * All rights reserved
+ *
+ * The license below extends only to copyright in the software and shall
+ * not be construed as granting a license to any other intellectual
+ * property including but not limited to intellectual property relating
+ * to a hardware implementation of the functionality of the software
+ * licensed hereunder.  You may use the software subject to the license
+ * terms below provided that you ensure that this notice is replicated
+ * unmodified and in its entirety in all distributions of the software,
+ * modified or unmodified, in source code or in binary form.
+ *
  * Copyright (c) 2000-2005 The Regents of The University of Michigan
  * Copyright (c) 2008 The Hewlett-Packard Development Company
  * All rights reserved.
@@ -25,250 +37,109 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * Authors: Nathan Binkert
  */
 
-#include <Python.h>
+#include "pybind11/embed.h"
 
-#include <marshal.h>
-#include <zlib.h>
+#include "sim/init.hh"
 
-#include <csignal>
-#include <iostream>
-#include <list>
+#include <map>
 #include <string>
 
 #include "base/cprintf.hh"
-#include "base/misc.hh"
-#include "base/types.hh"
-#include "sim/async.hh"
-#include "sim/core.hh"
-#include "sim/init.hh"
+#include "python/pybind11/pybind.hh"
+#include "python/pybind_init.hh"
 
-using namespace std;
+namespace py = pybind11;
 
-/// Stats signal handler.
+namespace gem5
+{
+
+pybind11::module_ *EmbeddedPyBind::mod = nullptr;
+
+EmbeddedPyBind::EmbeddedPyBind(const char *_name,
+                               void (*init_func)(py::module_ &),
+                               const char *_base) :
+    initFunc(init_func), name(_name), base(_base)
+{
+    init();
+}
+
+EmbeddedPyBind::EmbeddedPyBind(const char *_name,
+                               void (*init_func)(py::module_ &)) :
+    EmbeddedPyBind(_name, init_func, "")
+{}
+
 void
-dumpStatsHandler(int sigtype)
+EmbeddedPyBind::init()
 {
-    async_event = true;
-    async_statdump = true;
-}
-
-void
-dumprstStatsHandler(int sigtype)
-{
-    async_event = true;
-    async_statdump = true;
-    async_statreset = true;
-}
-
-/// Exit signal handler.
-void
-exitNowHandler(int sigtype)
-{
-    async_event = true;
-    async_exit = true;
-}
-
-/// Abort signal handler.
-void
-abortHandler(int sigtype)
-{
-    ccprintf(cerr, "Program aborted at cycle %d\n", curTick());
-}
-
-/*
- * M5 can do several special things when various signals are sent.
- * None are mandatory.
- */
-void
-initSignals()
-{
-    // Floating point exceptions may happen on misspeculated paths, so
-    // ignore them
-    signal(SIGFPE, SIG_IGN);
-
-    // We use SIGTRAP sometimes for debugging
-    signal(SIGTRAP, SIG_IGN);
-
-    // Dump intermediate stats
-    signal(SIGUSR1, dumpStatsHandler);
-
-    // Dump intermediate stats and reset them
-    signal(SIGUSR2, dumprstStatsHandler);
-
-    // Exit cleanly on Interrupt (Ctrl-C)
-    signal(SIGINT, exitNowHandler);
-
-    // Print out cycle number on abort
-    signal(SIGABRT, abortHandler);
-}
-
-// The python library is totally messed up with respect to constness,
-// so make a simple macro to make life a little easier
-#define PyCC(x) (const_cast<char *>(x))
-
-EmbeddedPython *EmbeddedPython::importer = NULL;
-PyObject *EmbeddedPython::importerModule = NULL;
-EmbeddedPython::EmbeddedPython(const char *filename, const char *abspath,
-    const char *modpath, const unsigned char *code, int zlen, int len)
-    : filename(filename), abspath(abspath), modpath(modpath), code(code),
-      zlen(zlen), len(len)
-{
-    // if we've added the importer keep track of it because we need it
-    // to bootstrap.
-    if (string(modpath) == string("importer"))
-        importer = this;
-    else
-        getList().push_back(this);
-}
-
-list<EmbeddedPython *> &
-EmbeddedPython::getList()
-{
-    static list<EmbeddedPython *> the_list;
-    return the_list;
-}
-
-/*
- * Uncompress and unmarshal the code object stored in the
- * EmbeddedPython
- */
-PyObject *
-EmbeddedPython::getCode() const
-{
-    Bytef marshalled[len];
-    uLongf unzlen = len;
-    int ret = uncompress(marshalled, &unzlen, (const Bytef *)code, zlen);
-    if (ret != Z_OK)
-        panic("Could not uncompress code: %s\n", zError(ret));
-    assert(unzlen == (uLongf)len);
-
-    return PyMarshal_ReadObjectFromString((char *)marshalled, len);
-}
-
-bool
-EmbeddedPython::addModule() const
-{
-    PyObject *code = getCode();
-    PyObject *result = PyObject_CallMethod(importerModule, PyCC("add_module"),
-        PyCC("sssO"), filename, abspath, modpath, code);
-    if (!result) {
-        PyErr_Print();
-        return false;
+    // If this module is already registered, complain and stop.
+    if (registered) {
+        cprintf("Warning: %s already registered.\n", name);
+        return;
     }
 
-    Py_DECREF(result);
-    return true;
-}
+    auto &ready = getReady();
+    auto &pending = getPending();
 
-/*
- * Load and initialize all of the python parts of M5, including Swig
- * and the embedded module importer.
- */
-int
-EmbeddedPython::initAll()
-{
-    // Load the importer module
-    PyObject *code = importer->getCode();
-    importerModule = PyImport_ExecCodeModule(PyCC("importer"), code);
-    if (!importerModule) {
-        PyErr_Print();
-        return 1;
+    // If we're not ready for this module yet, defer intialization.
+    if (!mod || (!base.empty() && ready.find(base) == ready.end())) {
+        pending.insert({std::string(base), this});
+        return;
     }
 
-    // Load the rest of the embedded python files into the embedded
-    // python importer
-    list<EmbeddedPython *>::iterator i = getList().begin();
-    list<EmbeddedPython *>::iterator end = getList().end();
-    for (; i != end; ++i)
-        if (!(*i)->addModule())
-            return 1;
+    // We must be ready, so set this module up.
+    initFunc(*mod);
+    ready[name] = this;
+    registered = true;
 
-    return 0;
-}
-
-EmbeddedSwig::EmbeddedSwig(void (*init_func)())
-    : initFunc(init_func)
-{
-    getList().push_back(this);
-}
-
-list<EmbeddedSwig *> &
-EmbeddedSwig::getList()
-{
-    static list<EmbeddedSwig *> the_list;
-    return the_list;
+    // Find any other modules that were waiting for this one and init them.
+    initPending(name);
 }
 
 void
-EmbeddedSwig::initAll()
+EmbeddedPyBind::initPending(const std::string &finished)
 {
-    // initialize SWIG modules.  initSwig() is autogenerated and calls
-    // all of the individual swig initialization functions.
-    list<EmbeddedSwig *>::iterator i = getList().begin();
-    list<EmbeddedSwig *>::iterator end = getList().end();
-    for (; i != end; ++i)
-        (*i)->initFunc();
+    auto &pending = getPending();
+
+    auto range = pending.equal_range(finished);
+    std::list<std::pair<std::string, EmbeddedPyBind *>> todo(
+        range.first, range.second);
+    pending.erase(range.first, range.second);
+
+    for (auto &entry: todo)
+        entry.second->init();
 }
 
-int
-initM5Python()
+std::map<std::string, EmbeddedPyBind *> &
+EmbeddedPyBind::getReady()
 {
-    EmbeddedSwig::initAll();
-    return EmbeddedPython::initAll();
+    static std::map<std::string, EmbeddedPyBind *> ready;
+    return ready;
 }
 
-/*
- * Make the commands array weak so that they can be overridden (used
- * by unit tests to specify a different python main function.
- */
-const char * __attribute__((weak)) m5MainCommands[] = {
-    "import m5",
-    "m5.main()",
-    0 // sentinel is required
-};
-
-/*
- * Start up the M5 simulator.  This mostly vectors into the python
- * main function.
- */
-int
-m5Main(int argc, char **argv)
+std::multimap<std::string, EmbeddedPyBind *> &
+EmbeddedPyBind::getPending()
 {
-    PySys_SetArgv(argc, argv);
-
-    // We have to set things up in the special __main__ module
-    PyObject *module = PyImport_AddModule(PyCC("__main__"));
-    if (module == NULL)
-        panic("Could not import __main__");
-    PyObject *dict = PyModule_GetDict(module);
-
-    // import the main m5 module
-    PyObject *result;
-    const char **command = m5MainCommands;
-
-    // evaluate each command in the m5MainCommands array (basically a
-    // bunch of python statements.
-    while (*command) {
-        result = PyRun_String(*command, Py_file_input, dict, dict);
-        if (!result) {
-            PyErr_Print();
-            return 1;
-        }
-        Py_DECREF(result);
-
-        command++;
-    }
-
-    return 0;
+    static std::multimap<std::string, EmbeddedPyBind *> pending;
+    return pending;
 }
 
-PyMODINIT_FUNC
-initm5(void)
+void
+EmbeddedPyBind::initAll(py::module_ &_m5)
 {
-    initM5Python();
-    PyImport_ImportModule(PyCC("m5"));
+    pybind_init_core(_m5);
+    pybind_init_debug(_m5);
+
+    pybind_init_event(_m5);
+    pybind_init_stats(_m5);
+
+    mod = &_m5;
+
+    // Init all the modules that were waiting on the _m5 module itself.
+    initPending("");
 }
+
+GEM5_PYBIND_MODULE_INIT(_m5, EmbeddedPyBind::initAll)
+
+} // namespace gem5

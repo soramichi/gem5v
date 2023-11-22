@@ -32,11 +32,29 @@
 # THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-#
-# Authors: Gabe Black
 
-microcode = '''
-# FLDCW
+microcode = """
+
+def macroop FLDCW_M {
+    ld t1, seg, sib, disp, dataSize=2
+    wrval fcw, t1
+};
+
+def macroop FLDCW_P {
+    ld t1, seg, riprel, disp, dataSize=2
+    wrval fcw, t1
+};
+
 # FSTCW
-# FNSTCW
-'''
+
+def macroop FNSTCW_M {
+    rdval t1, fcw
+    st t1, seg, sib, disp, dataSize=2
+};
+
+def macroop FNSTCW_P {
+    rdip t7
+    rdval t1, fcw
+    st t1, seg, riprel, disp, dataSize=2
+};
+"""

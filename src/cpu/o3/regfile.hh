@@ -1,5 +1,18 @@
 /*
+ * Copyright (c) 2016-2018 ARM Limited
+ * All rights reserved
+ *
+ * The license below extends only to copyright in the software and shall
+ * not be construed as granting a license to any other intellectual
+ * property including but not limited to intellectual property relating
+ * to a hardware implementation of the functionality of the software
+ * licensed hereunder. You may use the software subject to the license
+ * terms below provided that you ensure that this notice is replicated
+ * unmodified and in its entirety in all distributions of the software,
+ * modified or unmodified, in source code or in binary form.
+ *
  * Copyright (c) 2004-2005 The Regents of The University of Michigan
+ * Copyright (c) 2013 Advanced Micro Devices, Inc.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -24,189 +37,303 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * Authors: Kevin Lim
- *          Gabe Black
  */
 
 #ifndef __CPU_O3_REGFILE_HH__
 #define __CPU_O3_REGFILE_HH__
 
+#include <cstring>
 #include <vector>
 
-#include "arch/isa_traits.hh"
-#include "arch/kernel_stats.hh"
-#include "arch/types.hh"
+#include "arch/generic/isa.hh"
 #include "base/trace.hh"
-#include "config/the_isa.hh"
 #include "cpu/o3/comm.hh"
+#include "cpu/regfile.hh"
 #include "debug/IEW.hh"
+
+namespace gem5
+{
+
+namespace o3
+{
+
+class UnifiedFreeList;
 
 /**
  * Simple physical register file class.
- * Right now this is specific to Alpha until we decide if/how to make things
- * generic enough to support other ISAs.
  */
-template <class Impl>
 class PhysRegFile
 {
-  protected:
-    typedef TheISA::IntReg IntReg;
-    typedef TheISA::FloatReg FloatReg;
-    typedef TheISA::FloatRegBits FloatRegBits;
+  private:
 
-    typedef union {
-        FloatReg d;
-        FloatRegBits q;
-    } PhysFloatReg;
-
-    // Note that most of the definitions of the IntReg, FloatReg, etc. exist
-    // within the Impl/ISA class and not within this PhysRegFile class.
-
-    // Will make these registers public for now, but they probably should
-    // be private eventually with some accessor functions.
+    using PhysIds = std::vector<PhysRegId>;
   public:
-    typedef typename Impl::O3CPU O3CPU;
+    using IdRange = std::pair<PhysIds::iterator,
+                              PhysIds::iterator>;
+  private:
+    /** Integer register file. */
+    RegFile intRegFile;
+    std::vector<PhysRegId> intRegIds;
 
+    /** Floating point register file. */
+    RegFile floatRegFile;
+    std::vector<PhysRegId> floatRegIds;
+
+    /** Vector register file. */
+    RegFile vectorRegFile;
+    std::vector<PhysRegId> vecRegIds;
+
+    /** Vector element register file. */
+    RegFile vectorElemRegFile;
+    std::vector<PhysRegId> vecElemIds;
+
+    /** Predicate register file. */
+    RegFile vecPredRegFile;
+    std::vector<PhysRegId> vecPredRegIds;
+
+    /** Matrix register file. */
+    RegFile matRegFile;
+    std::vector<PhysRegId> matRegIds;
+
+    /** Condition-code register file. */
+    RegFile ccRegFile;
+    std::vector<PhysRegId> ccRegIds;
+
+    /** Misc Reg Ids */
+    std::vector<PhysRegId> miscRegIds;
+
+    /**
+     * Number of physical general purpose registers
+     */
+    unsigned numPhysicalIntRegs;
+
+    /**
+     * Number of physical floating point registers
+     */
+    unsigned numPhysicalFloatRegs;
+
+    /**
+     * Number of physical vector registers
+     */
+    unsigned numPhysicalVecRegs;
+
+    /**
+     * Number of physical vector element registers
+     */
+    unsigned numPhysicalVecElemRegs;
+
+    /**
+     * Number of physical predicate registers
+     */
+    unsigned numPhysicalVecPredRegs;
+
+    /**
+     * Number of physical matrix registers
+     */
+    unsigned numPhysicalMatRegs;
+
+    /**
+     * Number of physical CC registers
+     */
+    unsigned numPhysicalCCRegs;
+
+    /** Total number of physical registers. */
+    unsigned totalNumRegs;
+
+  public:
     /**
      * Constructs a physical register file with the specified amount of
      * integer and floating point registers.
      */
-    PhysRegFile(O3CPU *_cpu, unsigned _numPhysicalIntRegs,
-                unsigned _numPhysicalFloatRegs);
+    PhysRegFile(unsigned _numPhysicalIntRegs,
+                unsigned _numPhysicalFloatRegs,
+                unsigned _numPhysicalVecRegs,
+                unsigned _numPhysicalVecPredRegs,
+                unsigned _numPhysicalMatRegs,
+                unsigned _numPhysicalCCRegs,
+                const BaseISA::RegClasses &classes);
 
     /**
      * Destructor to free resources
      */
-    ~PhysRegFile();
+    ~PhysRegFile() {}
 
-    //Everything below should be pretty well identical to the normal
-    //register file that exists within AlphaISA class.
-    //The duplication is unfortunate but it's better than having
-    //different ways to access certain registers.
+    /** Initialize the free list */
+    void initFreeList(UnifiedFreeList *freeList);
 
-    /** Reads an integer register. */
-    uint64_t readIntReg(PhysRegIndex reg_idx)
-    {
-        assert(reg_idx < numPhysicalIntRegs);
+    /** @return the total number of physical registers. */
+    unsigned totalNumPhysRegs() const { return totalNumRegs; }
 
-        DPRINTF(IEW, "RegFile: Access to int register %i, has data "
-                "%#x\n", int(reg_idx), intRegFile[reg_idx]);
-        return intRegFile[reg_idx];
+    /** Gets a misc register PhysRegIdPtr. */
+    PhysRegIdPtr getMiscRegId(RegIndex reg_idx) {
+        return &miscRegIds[reg_idx];
     }
 
-    /** Reads a floating point register (double precision). */
-    FloatReg readFloatReg(PhysRegIndex reg_idx)
+    RegVal
+    getReg(PhysRegIdPtr phys_reg) const
     {
-        // Remove the base Float reg dependency.
-        reg_idx = reg_idx - numPhysicalIntRegs;
+        const RegClassType type = phys_reg->classValue();
+        const RegIndex idx = phys_reg->index();
 
-        assert(reg_idx < numPhysicalFloatRegs + numPhysicalIntRegs);
-
-        FloatReg floatReg = floatRegFile[reg_idx].d;
-
-        DPRINTF(IEW, "RegFile: Access to float register %i, has "
-                "data %#x\n", int(reg_idx), floatRegFile[reg_idx].q);
-
-        return floatReg;
+        RegVal val;
+        switch (type) {
+          case IntRegClass:
+            val = intRegFile.reg(idx);
+            DPRINTF(IEW, "RegFile: Access to int register %i, has data %#x\n",
+                    idx, val);
+            return val;
+          case FloatRegClass:
+            val = floatRegFile.reg(idx);
+            DPRINTF(IEW, "RegFile: Access to float register %i has data %#x\n",
+                    idx, val);
+            return val;
+          case VecElemClass:
+            val = vectorElemRegFile.reg(idx);
+            DPRINTF(IEW, "RegFile: Access to vector element register %i "
+                    "has data %#x\n", idx, val);
+            return val;
+          case CCRegClass:
+            val = ccRegFile.reg(idx);
+            DPRINTF(IEW, "RegFile: Access to cc register %i has data %#x\n",
+                    idx, val);
+            return val;
+          default:
+            panic("Unsupported register class type %d.", type);
+        }
     }
 
-    FloatRegBits readFloatRegBits(PhysRegIndex reg_idx)
+    void
+    getReg(PhysRegIdPtr phys_reg, void *val) const
     {
-        // Remove the base Float reg dependency.
-        reg_idx = reg_idx - numPhysicalIntRegs;
+        const RegClassType type = phys_reg->classValue();
+        const RegIndex idx = phys_reg->index();
 
-        assert(reg_idx < numPhysicalFloatRegs + numPhysicalIntRegs);
-
-        FloatRegBits floatRegBits = floatRegFile[reg_idx].q;
-
-        DPRINTF(IEW, "RegFile: Access to float register %i as int, "
-                "has data %#x\n", int(reg_idx), (uint64_t)floatRegBits);
-
-        return floatRegBits;
+        switch (type) {
+          case IntRegClass:
+            *(RegVal *)val = getReg(phys_reg);
+            break;
+          case FloatRegClass:
+            *(RegVal *)val = getReg(phys_reg);
+            break;
+          case VecRegClass:
+            vectorRegFile.get(idx, val);
+            DPRINTF(IEW, "RegFile: Access to vector register %i, has "
+                    "data %s\n", idx, vectorRegFile.regClass.valString(val));
+            break;
+          case VecElemClass:
+            *(RegVal *)val = getReg(phys_reg);
+            break;
+          case VecPredRegClass:
+            vecPredRegFile.get(idx, val);
+            DPRINTF(IEW, "RegFile: Access to predicate register %i, has "
+                    "data %s\n", idx, vecPredRegFile.regClass.valString(val));
+            break;
+          case MatRegClass:
+            matRegFile.get(idx, val);
+            DPRINTF(IEW, "RegFile: Access to matrix register %i, has "
+                    "data %s\n", idx, matRegFile.regClass.valString(val));
+            break;
+          case CCRegClass:
+            *(RegVal *)val = getReg(phys_reg);
+            break;
+          default:
+            panic("Unrecognized register class type %d.", type);
+        }
     }
 
-    /** Sets an integer register to the given value. */
-    void setIntReg(PhysRegIndex reg_idx, uint64_t val)
+    void *
+    getWritableReg(PhysRegIdPtr phys_reg)
     {
-        assert(reg_idx < numPhysicalIntRegs);
+        const RegClassType type = phys_reg->classValue();
+        const RegIndex idx = phys_reg->index();
 
-        DPRINTF(IEW, "RegFile: Setting int register %i to %#x\n",
-                int(reg_idx), val);
-
-        if (reg_idx != TheISA::ZeroReg)
-            intRegFile[reg_idx] = val;
+        switch (type) {
+          case VecRegClass:
+            return vectorRegFile.ptr(idx);
+          case VecPredRegClass:
+            return vecPredRegFile.ptr(idx);
+          case MatRegClass:
+            return matRegFile.ptr(idx);
+          default:
+            panic("Unrecognized register class type %d.", type);
+        }
     }
 
-    /** Sets a double precision floating point register to the given value. */
-    void setFloatReg(PhysRegIndex reg_idx, FloatReg val)
+    void
+    setReg(PhysRegIdPtr phys_reg, RegVal val)
     {
-        // Remove the base Float reg dependency.
-        reg_idx = reg_idx - numPhysicalIntRegs;
+        const RegClassType type = phys_reg->classValue();
+        const RegIndex idx = phys_reg->index();
 
-        assert(reg_idx < numPhysicalFloatRegs);
-
-        DPRINTF(IEW, "RegFile: Setting float register %i to %#x\n",
-                int(reg_idx), (uint64_t)val);
-
-#if THE_ISA == ALPHA_ISA
-        if (reg_idx != TheISA::ZeroReg)
-#endif
-            floatRegFile[reg_idx].d = val;
+        switch (type) {
+          case InvalidRegClass:
+            break;
+          case IntRegClass:
+            intRegFile.reg(idx) = val;
+            DPRINTF(IEW, "RegFile: Setting int register %i to %#x\n",
+                    idx, val);
+            break;
+          case FloatRegClass:
+            floatRegFile.reg(idx) = val;
+            DPRINTF(IEW, "RegFile: Setting float register %i to %#x\n",
+                    idx, val);
+            break;
+          case VecElemClass:
+            vectorElemRegFile.reg(idx) = val;
+            DPRINTF(IEW, "RegFile: Setting vector element register %i to "
+                    "%#x\n", idx, val);
+            break;
+          case CCRegClass:
+            ccRegFile.reg(idx) = val;
+            DPRINTF(IEW, "RegFile: Setting cc register %i to %#x\n",
+                    idx, val);
+            break;
+          default:
+            panic("Unsupported register class type %d.", type);
+        }
     }
 
-    void setFloatRegBits(PhysRegIndex reg_idx, FloatRegBits val)
+    void
+    setReg(PhysRegIdPtr phys_reg, const void *val)
     {
-        // Remove the base Float reg dependency.
-        reg_idx = reg_idx - numPhysicalIntRegs;
+        const RegClassType type = phys_reg->classValue();
+        const RegIndex idx = phys_reg->index();
 
-        assert(reg_idx < numPhysicalFloatRegs);
-
-        DPRINTF(IEW, "RegFile: Setting float register %i to %#x\n",
-                int(reg_idx), (uint64_t)val);
-
-        floatRegFile[reg_idx].q = val;
+        switch (type) {
+          case IntRegClass:
+            setReg(phys_reg, *(RegVal *)val);
+            break;
+          case FloatRegClass:
+            setReg(phys_reg, *(RegVal *)val);
+            break;
+          case VecRegClass:
+            DPRINTF(IEW, "RegFile: Setting vector register %i to %s\n",
+                    idx, vectorRegFile.regClass.valString(val));
+            vectorRegFile.set(idx, val);
+            break;
+          case VecElemClass:
+            setReg(phys_reg, *(RegVal *)val);
+            break;
+          case VecPredRegClass:
+            DPRINTF(IEW, "RegFile: Setting predicate register %i to %s\n",
+                    idx, vecPredRegFile.regClass.valString(val));
+            vecPredRegFile.set(idx, val);
+            break;
+          case MatRegClass:
+            DPRINTF(IEW, "RegFile: Setting matrix register %i to %s\n",
+                    idx, matRegFile.regClass.valString(val));
+            matRegFile.set(idx, val);
+            break;
+          case CCRegClass:
+            setReg(phys_reg, *(RegVal *)val);
+            break;
+          default:
+            panic("Unrecognized register class type %d.", type);
+        }
     }
-
-  public:
-    /** (signed) integer register file. */
-    IntReg *intRegFile;
-
-    /** Floating point register file. */
-    PhysFloatReg *floatRegFile;
-
-  private:
-    int intrflag;                       // interrupt flag
-
-  private:
-    /** CPU pointer. */
-    O3CPU *cpu;
-
-  public:
-    /** Number of physical integer registers. */
-    unsigned numPhysicalIntRegs;
-    /** Number of physical floating point registers. */
-    unsigned numPhysicalFloatRegs;
 };
 
-template <class Impl>
-PhysRegFile<Impl>::PhysRegFile(O3CPU *_cpu, unsigned _numPhysicalIntRegs,
-                               unsigned _numPhysicalFloatRegs)
-    : cpu(_cpu), numPhysicalIntRegs(_numPhysicalIntRegs),
-      numPhysicalFloatRegs(_numPhysicalFloatRegs)
-{
-    intRegFile = new IntReg[numPhysicalIntRegs];
-    floatRegFile = new PhysFloatReg[numPhysicalFloatRegs];
+} // namespace o3
+} // namespace gem5
 
-    memset(intRegFile, 0, sizeof(IntReg) * numPhysicalIntRegs);
-    memset(floatRegFile, 0, sizeof(PhysFloatReg) * numPhysicalFloatRegs);
-}
-
-template <class Impl>
-PhysRegFile<Impl>::~PhysRegFile()
-{
-    delete intRegFile;
-    delete floatRegFile;
-}
-
-#endif
+#endif //__CPU_O3_REGFILE_HH__

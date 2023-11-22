@@ -29,36 +29,23 @@
 #ifndef __MEM_RUBY_SLICC_INTERFACE_RUBYSLICC_COMPONENTMAPPINGS_HH__
 #define __MEM_RUBY_SLICC_INTERFACE_RUBYSLICC_COMPONENTMAPPINGS_HH__
 
-#include "mem/protocol/MachineType.hh"
 #include "mem/ruby/common/Address.hh"
-#include "mem/ruby/common/Global.hh"
+#include "mem/ruby/common/MachineID.hh"
 #include "mem/ruby/common/NetDest.hh"
-#include "mem/ruby/system/DirectoryMemory.hh"
-#include "mem/ruby/system/MachineID.hh"
+#include "mem/ruby/protocol/MachineType.hh"
+#include "mem/ruby/structures/DirectoryMemory.hh"
 
-// used to determine the home directory
-// returns a value between 0 and total_directories_within_the_system
-inline NodeID
-map_Address_to_DirectoryNode(const Address& addr)
+namespace gem5
 {
-    return DirectoryMemory::mapAddressToDirectoryVersion(addr);
-}
 
-// used to determine the home directory
-// returns a value between 0 and total_directories_within_the_system
-inline MachineID
-map_Address_to_Directory(const Address &addr)
+namespace ruby
 {
-    MachineID mach =
-        {MachineType_Directory, map_Address_to_DirectoryNode(addr)};
-    return mach;
-}
 
 inline NetDest
 broadcast(MachineType type)
 {
     NetDest dest;
-    for (int i = 0; i < MachineType_base_count(type); i++) {
+    for (NodeID i = 0; i < MachineType_base_count(type); i++) {
         MachineID mach = {type, i};
         dest.add(mach);
     }
@@ -66,13 +53,15 @@ broadcast(MachineType type)
 }
 
 inline MachineID
-mapAddressToRange(const Address & addr, MachineType type, int low_bit,
-                  int num_bits)
+mapAddressToRange(Addr addr, MachineType type, int low_bit,
+                  int num_bits, int cluster_id = 0)
 {
     MachineID mach = {type, 0};
     if (num_bits == 0)
-        return mach;
-    mach.num = addr.bitSelect(low_bit, low_bit + num_bits - 1);
+        mach.num = cluster_id;
+    else
+        mach.num = bitSelect(addr, low_bit, low_bit + num_bits - 1)
+            + (1 << num_bits) * cluster_id;
     return mach;
 }
 
@@ -93,5 +82,22 @@ machineCount(MachineType machType)
 {
     return MachineType_base_count(machType);
 }
+
+inline MachineID
+createMachineID(MachineType type, NodeID id)
+{
+    MachineID mach = {type, id};
+    return mach;
+}
+
+inline MachineID
+MachineTypeAndNodeIDToMachineID(MachineType type, NodeID node)
+{
+    MachineID mach = {type, node};
+    return mach;
+}
+
+} // namespace ruby
+} // namespace gem5
 
 #endif  // __MEM_RUBY_SLICC_INTERFACE_COMPONENTMAPPINGS_HH__

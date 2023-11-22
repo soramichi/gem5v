@@ -24,29 +24,33 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * Authors: Nathan Binkert
  */
 
 #include <sys/ioctl.h>
 #include <sys/types.h>
+
 #if defined(__sun__) || defined(__SUNPRO_CC)
 #include <sys/file.h>
+
 #endif
+
+#include "base/pollevent.hh"
 
 #include <fcntl.h>
 #include <unistd.h>
 
+#include <cerrno>
 #include <csignal>
+#include <cstring>
 
-#include "base/misc.hh"
-#include "base/pollevent.hh"
+#include "base/logging.hh"
 #include "base/types.hh"
 #include "sim/async.hh"
-#include "sim/core.hh"
+#include "sim/eventq.hh"
 #include "sim/serialize.hh"
 
-using namespace std;
+namespace gem5
+{
 
 PollQueue pollQueue;
 
@@ -57,6 +61,7 @@ PollEvent::PollEvent(int _fd, int _events)
 {
     pfd.fd = _fd;
     pfd.events = _events;
+    pfd.revents = 0;
 }
 
 PollEvent::~PollEvent()
@@ -86,7 +91,7 @@ PollEvent::enable()
 }
 
 void
-PollEvent::serialize(ostream &os)
+PollEvent::serialize(CheckpointOut &cp) const
 {
     SERIALIZE_SCALAR(pfd.fd);
     SERIALIZE_SCALAR(pfd.events);
@@ -94,7 +99,7 @@ PollEvent::serialize(ostream &os)
 }
 
 void
-PollEvent::unserialize(Checkpoint *cp, const std::string &section)
+PollEvent::unserialize(CheckpointIn &cp)
 {
     UNSERIALIZE_SCALAR(pfd.fd);
     UNSERIALIZE_SCALAR(pfd.events);
@@ -109,7 +114,6 @@ PollQueue::PollQueue()
 
 PollQueue::~PollQueue()
 {
-    removeHandler();
     for (int i = 0; i < num_fds; i++)
         setupAsyncIO(poll_fds[0].fd, false);
 
@@ -170,7 +174,6 @@ PollQueue::schedule(PollEvent *event)
             max_size *= 2;
         } else {
             max_size = 16;
-            setupHandler();
         }
 
         poll_fds = new pollfd[max_size];
@@ -197,83 +200,55 @@ PollQueue::service()
     }
 }
 
-struct sigaction PollQueue::oldio;
-struct sigaction PollQueue::oldalrm;
-bool PollQueue::handler = false;
+template <class ArgT>
+static int fcntlHelper(int fd, int cmd, ArgT arg)
+{
+    int retval = fcntl(fd, cmd, arg);
+    if (retval == -1) {
+        char *errstr = strerror(errno);
+        panic("fcntl(%d, %d, %s): \"%s\" when setting up async IO.\n",
+              errstr, fd, cmd, arg);
+    }
+    return retval;
+}
+
+static int fcntlHelper(int fd, int cmd)
+{
+    int retval = fcntl(fd, cmd);
+    if (retval == -1) {
+        char *errstr = strerror(errno);
+        panic("fcntl(%d, %d): \"%s\" when setting up async IO.\n",
+              errstr, fd, cmd);
+    }
+    return retval;
+}
 
 void
 PollQueue::setupAsyncIO(int fd, bool set)
 {
-    int flags = fcntl(fd, F_GETFL);
-    if (flags == -1)
-        panic("Could not set up async IO");
+    int flags = fcntlHelper(fd, F_GETFL);
 
     if (set)
         flags |= FASYNC;
     else
         flags &= ~(FASYNC);
 
-    if (fcntl(fd, F_SETFL, flags) == -1)
-        panic("Could not set up async IO");
+    if (set)
+        fcntlHelper(fd, F_SETOWN, getpid());
 
+    fcntlHelper(fd, F_SETFL, flags);
+
+    // The file descriptor might already have events pending. We won't
+    // see them if they occurred before we set the FASYNC
+    // flag. Simulate a SIGIO to ensure that the FD will be polled in
+    // next iteration of the simulation loop. We could just poll it,
+    // but this is much simpler.
     if (set) {
-      if (fcntl(fd, F_SETOWN, getpid()) == -1)
-        panic("Could not set up async IO");
+        async_event = true;
+        async_io = true;
+        /* Wake up some event queue to handle event */
+        getEventQueue(0)->wakeup();
     }
 }
 
-void
-PollQueue::setupHandler()
-{
-    struct sigaction act;
-
-    act.sa_handler = handleIO;
-    sigemptyset(&act.sa_mask);
-    act.sa_flags = SA_RESTART;
-
-    if (sigaction(SIGIO, &act, &oldio) == -1)
-        panic("could not do sigaction");
-
-    act.sa_handler = handleALRM;
-    sigemptyset(&act.sa_mask);
-    act.sa_flags = SA_RESTART;
-
-    if (sigaction(SIGALRM, &act, &oldalrm) == -1)
-        panic("could not do sigaction");
-
-    alarm(1);
-
-    handler = true;
-}
-
-void
-PollQueue::removeHandler()
-{
-    if (sigaction(SIGIO, &oldio, NULL) == -1)
-        panic("could not remove handler");
-
-    if (sigaction(SIGIO, &oldalrm, NULL) == -1)
-        panic("could not remove handler");
-}
-
-void
-PollQueue::handleIO(int sig)
-{
-    if (sig != SIGIO)
-        panic("Wrong Handler");
-
-    async_event = true;
-    async_io = true;
-}
-
-void
-PollQueue::handleALRM(int sig)
-{
-    if (sig != SIGALRM)
-        panic("Wrong Handler");
-
-    async_event = true;
-    async_alarm = true;
-    alarm(1);
-}
-
+} // namespace gem5

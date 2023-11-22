@@ -1,4 +1,16 @@
 /*
+ * Copyright (c) 2020-2021 ARM Limited
+ * All rights reserved.
+ *
+ * The license below extends only to copyright in the software and shall
+ * not be construed as granting a license to any other intellectual
+ * property including but not limited to intellectual property relating
+ * to a hardware implementation of the functionality of the software
+ * licensed hereunder.  You may use the software subject to the license
+ * terms below provided that you ensure that this notice is replicated
+ * unmodified and in its entirety in all distributions of the software,
+ * modified or unmodified, in source code or in binary form.
+ *
  * Copyright (c) 1999-2008 Mark D. Hill and David A. Wood
  * All rights reserved.
  *
@@ -38,16 +50,19 @@
 #include <iostream>
 #include <set>
 
-#include "mem/ruby/common/TypeDefines.hh"
-#include "sim/eventq.hh"
+#include "sim/clocked_object.hh"
+
+namespace gem5
+{
+
+namespace ruby
+{
 
 class Consumer
 {
   public:
-    Consumer(EventManager *_em)
-        : m_last_scheduled_wakeup(0), m_last_wakeup(0), em(_em)
-    {
-    }
+    Consumer(ClockedObject *em,
+             Event::Priority ev_prio = Event::Default_Pri);
 
     virtual
     ~Consumer()
@@ -57,64 +72,30 @@ class Consumer
     virtual void print(std::ostream& out) const = 0;
     virtual void storeEventInfo(int info) {}
 
-    const Tick&
-    getLastScheduledWakeup() const
-    {
-        return m_last_scheduled_wakeup;
-    }
-
-    void
-    setLastScheduledWakeup(const Tick& time)
-    {
-        m_last_scheduled_wakeup = time;
-    }
-
     bool
     alreadyScheduled(Tick time)
     {
-        return m_scheduled_wakeups.find(time) != m_scheduled_wakeups.end();
+        return m_wakeup_ticks.find(time) != m_wakeup_ticks.end();
     }
 
-    void
-    insertScheduledWakeupTime(Tick time)
+    ClockedObject *
+    getObject()
     {
-        m_scheduled_wakeups.insert(time);
+        return em;
     }
 
-    void
-    removeScheduledWakeupTime(Tick time)
-    {
-        assert(alreadyScheduled(time));
-        m_scheduled_wakeups.erase(time);
-    }
-
-    void scheduleEvent(Time timeDelta);
-    void scheduleEventAbsolute(Time timeAbs);
+    void scheduleEventAbsolute(Tick timeAbs);
+    void scheduleEvent(Cycles timeDelta);
 
   private:
-    Tick m_last_scheduled_wakeup;
-    std::set<Tick> m_scheduled_wakeups;
-    Tick m_last_wakeup;
-    EventManager *em;
+    std::set<Tick> m_wakeup_ticks;
+    EventFunctionWrapper m_wakeup_event;
+    ClockedObject *em;
 
-    class ConsumerEvent : public Event
-    {
-      public:
-          ConsumerEvent(Consumer* _consumer)
-              : Event(Default_Pri, AutoDelete), m_consumer_ptr(_consumer)
-          {
-          }
-
-          void process()
-          {
-              m_consumer_ptr->wakeup();
-              m_consumer_ptr->removeScheduledWakeupTime(when());
-          }
-
-      private:
-          Consumer* m_consumer_ptr;
-    };
+    void scheduleNextWakeup();
+    void processCurrentEvent();
 };
+
 
 inline std::ostream&
 operator<<(std::ostream& out, const Consumer& obj)
@@ -123,5 +104,8 @@ operator<<(std::ostream& out, const Consumer& obj)
     out << std::flush;
     return out;
 }
+
+} // namespace ruby
+} // namespace gem5
 
 #endif // __MEM_RUBY_COMMON_CONSUMER_HH__

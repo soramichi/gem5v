@@ -24,15 +24,17 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * Authors: Gabe Black
  */
 
 #ifndef __DEV_X86_SPEAKER_HH__
 #define __DEV_X86_SPEAKER_HH__
 
 #include "base/bitunion.hh"
+#include "dev/io_device.hh"
 #include "params/PcSpeaker.hh"
+
+namespace gem5
+{
 
 namespace X86ISA
 {
@@ -55,29 +57,22 @@ class Speaker : public BasicPioDevice
     I8254 * timer;
 
   public:
-    typedef PcSpeakerParams Params;
+    using Params = PcSpeakerParams;
 
-    const Params *
-    params() const
+    Speaker(const Params &p) : BasicPioDevice(p, 1),
+        latency(p.pio_latency), controlVal(0), timer(p.i8254)
     {
-        return dynamic_cast<const Params *>(_params);
     }
 
-    Speaker(Params *p) : BasicPioDevice(p),
-        latency(p->pio_latency), controlVal(0), timer(p->i8254)
-    {
-        pioSize = 1;
-    }
+    Tick read(PacketPtr pkt) override;
 
-    Tick read(PacketPtr pkt);
+    Tick write(PacketPtr pkt) override;
 
-    Tick write(PacketPtr pkt);
-
-    virtual void serialize(std::ostream &os);
-    virtual void unserialize(Checkpoint *cp, const std::string &section);
-
+    void serialize(CheckpointOut &cp) const override;
+    void unserialize(CheckpointIn &cp) override;
 };
 
 } // namespace X86ISA
+} // namespace gem5
 
 #endif //__DEV_X86_SPEAKER_HH__

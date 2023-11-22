@@ -1,5 +1,6 @@
 # Copyright (c) 1999-2008 Mark D. Hill and David A. Wood
 # Copyright (c) 2009 The Hewlett-Packard Development Company
+# Copyright (c) 2013 Advanced Micro Devices, Inc.
 # All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
@@ -26,25 +27,30 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 from slicc.ast.StatementAST import StatementAST
+from slicc.ast.LocalVariableAST import LocalVariableAST
 from slicc.symbols import Type
+
 
 class ExprStatementAST(StatementAST):
     def __init__(self, slicc, expr):
-        super(ExprStatementAST, self).__init__(slicc)
+        super().__init__(slicc)
         self.expr = expr
 
     def __repr__(self):
-        return "[ExprStatementAST: %s]" % (self.expr)
+        return f"[ExprStatementAST: {self.expr}]"
 
-    def generate(self, code, return_type):
-        actual_type,rcode = self.expr.inline(True)
+    def generate(self, code, return_type, **kwargs):
+        actual_type, rcode = self.expr.inline(True, **kwargs)
         code("$rcode;")
 
-        # The return type must be void
-        if actual_type != self.symtab.find("void", Type):
-            self.expr.error("Non-void return must not be ignored, " + \
-                            "return type is '%s'", actual_type.ident)
+        # The return type must be void, except for local var decls
+        if not isinstance(
+            self.expr, LocalVariableAST
+        ) and actual_type != self.symtab.find("void", Type):
+            self.expr.warning(
+                "Non-void return ignored, " + "return type is '%s'",
+                actual_type.ident,
+            )
 
     def findResources(self, resources):
         self.expr.findResources(resources)
-

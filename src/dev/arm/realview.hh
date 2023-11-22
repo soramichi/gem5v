@@ -36,8 +36,6 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * Authors: Ali Saidi
  */
 
 /**
@@ -52,72 +50,33 @@
 #include "dev/platform.hh"
 #include "params/RealView.hh"
 
+namespace gem5
+{
+
+class BaseGic;
 class IdeController;
-class System;
 
 class RealView : public Platform
 {
   public:
-    /** Pointer to the system */
-    System *system;
-
-    Gic *gic;
+    BaseGic *gic;
 
   public:
-    typedef RealViewParams Params;
-    const Params *
-    params() const {
-        return dynamic_cast<const Params *>(_params);
-    }
+    using Params = RealViewParams;
 
-    /**
-     * Constructor for the Tsunami Class.
-     * @param name name of the object
-     * @param s system the object belongs to
-     * @param intctrl pointer to the interrupt controller
-     */
-    RealView(const Params *p);
+    RealView(const Params &p);
 
     /** Give platform a pointer to interrupt controller */
-    void setGic(Gic *_gic) { gic = _gic; }
+    void setGic(BaseGic *_gic) { gic = _gic; }
 
-    /**
-     * Cause the cpu to post a serial interrupt to the CPU.
-     */
-    virtual void postConsoleInt();
+  public: // Public Platform interfaces
+    void postConsoleInt() override;
+    void clearConsoleInt() override;
 
-    /**
-     * Clear a posted CPU interrupt
-     */
-    virtual void clearConsoleInt();
-
-    /**
-     * Cause the chipset to post a cpi interrupt to the CPU.
-     */
-    virtual void postPciInt(int line);
-
-    /**
-     * Clear a posted PCI->CPU interrupt
-     */
-    virtual void clearPciInt(int line);
-
-
-    virtual Addr pciToDma(Addr pciAddr) const;
-
-    /**
-     * Calculate the configuration address given a bus/dev/func.
-     */
-    virtual Addr calcPciConfigAddr(int bus, int dev, int func);
-
-    /**
-     * Calculate the address for an IO location on the PCI bus.
-     */
-    virtual Addr calcPciIOAddr(Addr addr);
-
-    /**
-     * Calculate the address for a memory location on the PCI bus.
-     */
-    virtual Addr calcPciMemAddr(Addr addr);
+    void postPciInt(int line) override;
+    void clearPciInt(int line) override;
 };
+
+} // namespace gem5
 
 #endif // __DEV_ARM_RealView_HH__

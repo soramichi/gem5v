@@ -24,21 +24,47 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * Authors: Gabe Black
  */
 
 #ifndef __ARCH_X86_REG_MSR_HH__
 #define __ARCH_X86_REG_MSR_HH__
 
+#include <unordered_map>
+
 #include "arch/x86/regs/misc.hh"
 #include "base/types.hh"
+
+namespace gem5
+{
 
 namespace X86ISA
 {
 
-bool msrAddrToIndex(MiscRegIndex &regNum, Addr addr);
+typedef std::unordered_map<Addr, RegIndex> MsrMap;
+
+/**
+ * Map between MSR addresses and their corresponding misc registers.
+ *
+ * @note This map is usually only used when enumeration of supported
+ * MSRs is needed (e.g., in virtualized CPUs). Code that needs to
+ * look-up specific MSRs should use msrAddrToIndex().
+ */
+extern const MsrMap msrMap;
+
+/**
+ * Find and return the misc reg corresponding to an MSR address.
+ *
+ * Look for an MSR (addr) in #msrMap and return the
+ * corresponding misc reg in regNum. The value of regNum is undefined
+ * if the MSR was not found.
+ *
+ * @param regNum misc reg index (out).
+ * @param addr MSR address
+ * @return True if the MSR was found, false otherwise.
+ */
+bool msrAddrToIndex(RegIndex &regNum, Addr addr);
 
 } // namespace X86ISA
+} // namespace gem5
 
 #endif // __ARCH_X86_REG_MSR_HH__

@@ -1,3 +1,15 @@
+# Copyright (c) 2013 ARM Limited
+# All rights reserved.
+#
+# The license below extends only to copyright in the software and shall
+# not be construed as granting a license to any other intellectual
+# property including but not limited to intellectual property relating
+# to a hardware implementation of the functionality of the software
+# licensed hereunder.  You may use the software subject to the license
+# terms below provided that you ensure that this notice is replicated
+# unmodified and in its entirety in all distributions of the software,
+# modified or unmodified, in source code or in binary form.
+#
 # Copyright (c) 2006-2007 The Regents of The University of Michigan
 # All rights reserved.
 #
@@ -23,71 +35,11 @@
 # THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-#
-# Authors: Ron Dreslinski
 
-import m5
 from m5.objects import *
-
-# --------------------
-# Base L1 Cache
-# ====================
-
-class L1(BaseCache):
-    hit_latency = 2
-    response_latency = 2
-    block_size = 64
-    mshrs = 4
-    tgts_per_mshr = 8
-    is_top_level = True
-
-# ----------------------
-# Base L2 Cache
-# ----------------------
-
-class L2(BaseCache):
-    block_size = 64
-    hit_latency = 20
-    response_latency = 20
-    mshrs = 92
-    tgts_per_mshr = 16
-    write_buffers = 8
+from base_config import *
 
 nb_cores = 4
-cpus = [ AtomicSimpleCPU(cpu_id=i) for i in xrange(nb_cores) ]
-
-# system simulated
-system = System(cpu = cpus,
-                physmem = SimpleMemory(range = AddrRange('1024MB')),
-                membus = CoherentBus())
-
-# l2cache & bus
-system.toL2Bus = CoherentBus(clock = '2GHz')
-system.l2c = L2(clock = '2GHz', size='4MB', assoc=8)
-system.l2c.cpu_side = system.toL2Bus.master
-
-# connect l2c to membus
-system.l2c.mem_side = system.membus.slave
-
-# add L1 caches
-for cpu in cpus:
-    cpu.addPrivateSplitL1Caches(L1(size = '32kB', assoc = 1),
-                                L1(size = '32kB', assoc = 4))
-    # create the interrupt controller
-    cpu.createInterruptController()
-    # connect cpu level-1 caches to shared level-2 cache
-    cpu.connectAllPorts(system.toL2Bus, system.membus)
-    cpu.clock = '2GHz'
-
-# connect memory to membus
-system.physmem.port = system.membus.master
-
-# connect system port to membus
-system.system_port = system.membus.slave
-
-# -----------------------
-# run simulation
-# -----------------------
-
-root = Root( full_system = False, system = system )
-root.system.mem_mode = 'atomic'
+root = BaseSESystem(
+    mem_mode="atomic", cpu_class=AtomicSimpleCPU, num_cpus=nb_cores
+).create_root()

@@ -1,4 +1,16 @@
 /*
+ * Copyright (c) 2020-2021 ARM Limited
+ * All rights reserved.
+ *
+ * The license below extends only to copyright in the software and shall
+ * not be construed as granting a license to any other intellectual
+ * property including but not limited to intellectual property relating
+ * to a hardware implementation of the functionality of the software
+ * licensed hereunder.  You may use the software subject to the license
+ * terms below provided that you ensure that this notice is replicated
+ * unmodified and in its entirety in all distributions of the software,
+ * modified or unmodified, in source code or in binary form.
+ *
  * Copyright (c) 2012 Mark D. Hill and David A. Wood
  * All rights reserved.
  *
@@ -27,25 +39,61 @@
  */
 
 #include "mem/ruby/common/Consumer.hh"
-#include "mem/ruby/common/Global.hh"
-#include "mem/ruby/system/System.hh"
+
+namespace gem5
+{
+
+namespace ruby
+{
+
+Consumer::Consumer(ClockedObject *_em, Event::Priority ev_prio)
+    : m_wakeup_event([this]{ processCurrentEvent(); },
+                    "Consumer Event", false, ev_prio),
+      em(_em)
+{ }
 
 void
-Consumer::scheduleEvent(Time timeDelta)
+Consumer::scheduleEvent(Cycles timeDelta)
 {
-    scheduleEventAbsolute(timeDelta + g_system_ptr->getTime());
+    m_wakeup_ticks.insert(em->clockEdge(timeDelta));
+    scheduleNextWakeup();
 }
 
 void
-Consumer::scheduleEventAbsolute(Time timeAbs)
+Consumer::scheduleEventAbsolute(Tick evt_time)
 {
-    Tick evt_time = g_system_ptr->clockPeriod() * timeAbs;
-    if (!alreadyScheduled(evt_time)) {
-        // This wakeup is not redundant
-        ConsumerEvent *evt = new ConsumerEvent(this);
-        assert(timeAbs > g_system_ptr->getTime());
+    m_wakeup_ticks.insert(
+        divCeil(evt_time, em->clockPeriod()) * em->clockPeriod());
+    scheduleNextWakeup();
+}
 
-        em->schedule(evt, evt_time);
-        insertScheduledWakeupTime(evt_time);
+void
+Consumer::scheduleNextWakeup()
+{
+    // look for the next tick in the future to schedule
+    auto it = m_wakeup_ticks.lower_bound(em->clockEdge());
+    if (it != m_wakeup_ticks.end()) {
+        Tick when = *it;
+        assert(when >= em->clockEdge());
+        if (m_wakeup_event.scheduled() && (when < m_wakeup_event.when()))
+            em->reschedule(m_wakeup_event, when, true);
+        else if (!m_wakeup_event.scheduled())
+            em->schedule(m_wakeup_event, when);
     }
 }
+
+void
+Consumer::processCurrentEvent()
+{
+    auto curr = m_wakeup_ticks.begin();
+    assert(em->clockEdge() == *curr);
+
+    // remove the current tick from the wakeup list, wake up, and then schedule
+    // the next wakeup
+    m_wakeup_ticks.erase(curr);
+    wakeup();
+    scheduleNextWakeup();
+}
+
+} // namespace ruby
+} // namespace gem5

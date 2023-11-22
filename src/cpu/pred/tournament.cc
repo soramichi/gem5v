@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011 ARM Limited
+ * Copyright (c) 2011, 2014 ARM Limited
  * All rights reserved
  *
  * The license below extends only to copyright in the software and shall
@@ -36,45 +36,48 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * Authors: Kevin Lim
  */
 
-#include "base/intmath.hh"
 #include "cpu/pred/tournament.hh"
 
-TournamentBP::TournamentBP(unsigned _localPredictorSize,
-                           unsigned _localCtrBits,
-                           unsigned _localHistoryTableSize,
-                           unsigned _localHistoryBits,
-                           unsigned _globalPredictorSize,
-                           unsigned _globalHistoryBits,
-                           unsigned _globalCtrBits,
-                           unsigned _choicePredictorSize,
-                           unsigned _choiceCtrBits,
-                           unsigned _instShiftAmt)
-    : localPredictorSize(_localPredictorSize),
-      localCtrBits(_localCtrBits),
-      localHistoryTableSize(_localHistoryTableSize),
-      localHistoryBits(_localHistoryBits),
-      globalPredictorSize(_globalPredictorSize),
-      globalCtrBits(_globalCtrBits),
-      globalHistoryBits(_globalHistoryBits),
-      choicePredictorSize(_globalPredictorSize),
-      choiceCtrBits(_choiceCtrBits),
-      instShiftAmt(_instShiftAmt)
+#include "base/bitfield.hh"
+#include "base/intmath.hh"
+
+namespace gem5
+{
+
+namespace branch_prediction
+{
+
+TournamentBP::TournamentBP(const TournamentBPParams &params)
+    : BPredUnit(params),
+      localPredictorSize(params.localPredictorSize),
+      localCtrBits(params.localCtrBits),
+      localCtrs(localPredictorSize, SatCounter8(localCtrBits)),
+      localHistoryTableSize(params.localHistoryTableSize),
+      localHistoryBits(ceilLog2(params.localPredictorSize)),
+      globalPredictorSize(params.globalPredictorSize),
+      globalCtrBits(params.globalCtrBits),
+      globalCtrs(globalPredictorSize, SatCounter8(globalCtrBits)),
+      globalHistory(params.numThreads, 0),
+      globalHistoryBits(
+          ceilLog2(params.globalPredictorSize) >
+          ceilLog2(params.choicePredictorSize) ?
+          ceilLog2(params.globalPredictorSize) :
+          ceilLog2(params.choicePredictorSize)),
+      choicePredictorSize(params.choicePredictorSize),
+      choiceCtrBits(params.choiceCtrBits),
+      choiceCtrs(choicePredictorSize, SatCounter8(choiceCtrBits))
 {
     if (!isPowerOf2(localPredictorSize)) {
         fatal("Invalid local predictor size!\n");
     }
 
-    //Setup the array of counters for the local predictor
-    localCtrs.resize(localPredictorSize);
+    if (!isPowerOf2(globalPredictorSize)) {
+        fatal("Invalid global predictor size!\n");
+    }
 
-    for (int i = 0; i < localPredictorSize; ++i)
-        localCtrs[i].setBits(localCtrBits);
-
-    localPredictorMask = floorPow2(localPredictorSize) - 1;
+    localPredictorMask = mask(localHistoryBits);
 
     if (!isPowerOf2(localHistoryTableSize)) {
         fatal("Invalid local history table size!\n");
@@ -86,36 +89,39 @@ TournamentBP::TournamentBP(unsigned _localPredictorSize,
     for (int i = 0; i < localHistoryTableSize; ++i)
         localHistoryTable[i] = 0;
 
-    // Setup the local history mask
-    localHistoryMask = (1 << localHistoryBits) - 1;
-
-    if (!isPowerOf2(globalPredictorSize)) {
-        fatal("Invalid global predictor size!\n");
-    }
-
-    //Setup the array of counters for the global predictor
-    globalCtrs.resize(globalPredictorSize);
-
-    for (int i = 0; i < globalPredictorSize; ++i)
-        globalCtrs[i].setBits(globalCtrBits);
-
-    //Clear the global history
-    globalHistory = 0;
-    // Setup the global history mask
-    globalHistoryMask = (1 << globalHistoryBits) - 1;
+    // Set up the global history mask
+    // this is equivalent to mask(log2(globalPredictorSize)
+    globalHistoryMask = globalPredictorSize - 1;
 
     if (!isPowerOf2(choicePredictorSize)) {
         fatal("Invalid choice predictor size!\n");
     }
 
-    //Setup the array of counters for the choice predictor
-    choiceCtrs.resize(choicePredictorSize);
+    // Set up choiceHistoryMask
+    // this is equivalent to mask(log2(choicePredictorSize)
+    choiceHistoryMask = choicePredictorSize - 1;
 
-    for (int i = 0; i < choicePredictorSize; ++i)
-        choiceCtrs[i].setBits(choiceCtrBits);
+    //Set up historyRegisterMask
+    historyRegisterMask = mask(globalHistoryBits);
 
-    // @todo: Allow for different thresholds between the predictors.
-    threshold = (1 << (localCtrBits - 1)) - 1;
+    //Check that predictors don't use more bits than they have available
+    if (globalHistoryMask > historyRegisterMask) {
+        fatal("Global predictor too large for global history bits!\n");
+    }
+    if (choiceHistoryMask > historyRegisterMask) {
+        fatal("Choice predictor too large for global history bits!\n");
+    }
+
+    if (globalHistoryMask < historyRegisterMask &&
+        choiceHistoryMask < historyRegisterMask) {
+        inform("More global history bits than required by predictors\n");
+    }
+
+    // Set thresholds for the three predictors' counters
+    // This is equivalent to (2^(Ctr))/2 - 1
+    localThreshold  = (1ULL << (localCtrBits  - 1)) - 1;
+    globalThreshold = (1ULL << (globalCtrBits - 1)) - 1;
+    choiceThreshold = (1ULL << (choiceCtrBits - 1)) - 1;
 }
 
 inline
@@ -128,18 +134,18 @@ TournamentBP::calcLocHistIdx(Addr &branch_addr)
 
 inline
 void
-TournamentBP::updateGlobalHistTaken()
+TournamentBP::updateGlobalHistTaken(ThreadID tid)
 {
-    globalHistory = (globalHistory << 1) | 1;
-    globalHistory = globalHistory & globalHistoryMask;
+    globalHistory[tid] = (globalHistory[tid] << 1) | 1;
+    globalHistory[tid] = globalHistory[tid] & historyRegisterMask;
 }
 
 inline
 void
-TournamentBP::updateGlobalHistNotTaken()
+TournamentBP::updateGlobalHistNotTaken(ThreadID tid)
 {
-    globalHistory = (globalHistory << 1);
-    globalHistory = globalHistory & globalHistoryMask;
+    globalHistory[tid] = (globalHistory[tid] << 1);
+    globalHistory[tid] = globalHistory[tid] & historyRegisterMask;
 }
 
 inline
@@ -160,18 +166,18 @@ TournamentBP::updateLocalHistNotTaken(unsigned local_history_idx)
 
 
 void
-TournamentBP::BTBUpdate(Addr &branch_addr, void * &bp_history)
+TournamentBP::btbUpdate(ThreadID tid, Addr branch_addr, void * &bp_history)
 {
     unsigned local_history_idx = calcLocHistIdx(branch_addr);
-    //Update Global History to Not Taken
-    globalHistory = globalHistory & (globalHistoryMask - 1);
+    //Update Global History to Not Taken (clear LSB)
+    globalHistory[tid] &= (historyRegisterMask & ~1ULL);
     //Update Local History to Not Taken
     localHistoryTable[local_history_idx] =
-       localHistoryTable[local_history_idx] & (localPredictorMask - 1);
+       localHistoryTable[local_history_idx] & (localPredictorMask & ~1ULL);
 }
 
 bool
-TournamentBP::lookup(Addr &branch_addr, void * &bp_history)
+TournamentBP::lookup(ThreadID tid, Addr branch_addr, void * &bp_history)
 {
     bool local_prediction;
     unsigned local_history_idx;
@@ -184,46 +190,47 @@ TournamentBP::lookup(Addr &branch_addr, void * &bp_history)
     local_history_idx = calcLocHistIdx(branch_addr);
     local_predictor_idx = localHistoryTable[local_history_idx]
         & localPredictorMask;
-    local_prediction = localCtrs[local_predictor_idx].read() > threshold;
+    local_prediction = localCtrs[local_predictor_idx] > localThreshold;
 
     //Lookup in the global predictor to get its branch prediction
-    global_prediction = globalCtrs[globalHistory].read() > threshold;
+    global_prediction = globalThreshold <
+      globalCtrs[globalHistory[tid] & globalHistoryMask];
 
     //Lookup in the choice predictor to see which one to use
-    choice_prediction = choiceCtrs[globalHistory].read() > threshold;
+    choice_prediction = choiceThreshold <
+      choiceCtrs[globalHistory[tid] & choiceHistoryMask];
 
     // Create BPHistory and pass it back to be recorded.
     BPHistory *history = new BPHistory;
-    history->globalHistory = globalHistory;
+    history->globalHistory = globalHistory[tid];
     history->localPredTaken = local_prediction;
     history->globalPredTaken = global_prediction;
     history->globalUsed = choice_prediction;
+    history->localHistoryIdx = local_history_idx;
     history->localHistory = local_predictor_idx;
     bp_history = (void *)history;
 
-    assert(globalHistory < globalPredictorSize &&
-           local_history_idx < localHistoryTableSize &&
-           local_predictor_idx < localPredictorSize);
+    assert(local_history_idx < localHistoryTableSize);
 
-    // Commented code is for doing speculative update of counters and
-    // all histories.
+    // Speculative update of the global history and the
+    // selected local history.
     if (choice_prediction) {
         if (global_prediction) {
-            updateGlobalHistTaken();
+            updateGlobalHistTaken(tid);
             updateLocalHistTaken(local_history_idx);
             return true;
         } else {
-            updateGlobalHistNotTaken();
+            updateGlobalHistNotTaken(tid);
             updateLocalHistNotTaken(local_history_idx);
             return false;
         }
     } else {
         if (local_prediction) {
-            updateGlobalHistTaken();
+            updateGlobalHistTaken(tid);
             updateLocalHistTaken(local_history_idx);
             return true;
         } else {
-            updateGlobalHistNotTaken();
+            updateGlobalHistNotTaken(tid);
             updateLocalHistNotTaken(local_history_idx);
             return false;
         }
@@ -231,119 +238,121 @@ TournamentBP::lookup(Addr &branch_addr, void * &bp_history)
 }
 
 void
-TournamentBP::uncondBr(void * &bp_history)
+TournamentBP::uncondBranch(ThreadID tid, Addr pc, void * &bp_history)
 {
     // Create BPHistory and pass it back to be recorded.
     BPHistory *history = new BPHistory;
-    history->globalHistory = globalHistory;
+    history->globalHistory = globalHistory[tid];
     history->localPredTaken = true;
     history->globalPredTaken = true;
     history->globalUsed = true;
+    history->localHistoryIdx = invalidPredictorIndex;
     history->localHistory = invalidPredictorIndex;
     bp_history = static_cast<void *>(history);
 
-    updateGlobalHistTaken();
+    updateGlobalHistTaken(tid);
 }
 
 void
-TournamentBP::update(Addr &branch_addr, bool taken, void *bp_history,
-                     bool squashed)
+TournamentBP::update(ThreadID tid, Addr branch_addr, bool taken,
+                     void *bp_history, bool squashed,
+                     const StaticInstPtr & inst, Addr corrTarget)
 {
-    unsigned local_history_idx;
-    unsigned local_predictor_idx M5_VAR_USED;
-    unsigned local_predictor_hist;
+    assert(bp_history);
 
-    // Get the local predictor's current prediction
-    local_history_idx = calcLocHistIdx(branch_addr);
-    local_predictor_hist = localHistoryTable[local_history_idx];
-    local_predictor_idx = local_predictor_hist & localPredictorMask;
+    BPHistory *history = static_cast<BPHistory *>(bp_history);
 
-    if (bp_history) {
-        BPHistory *history = static_cast<BPHistory *>(bp_history);
-        // Update may also be called if the Branch target is incorrect even if
-        // the prediction is correct. In that case do not update the counters.
-        bool historyPred = false;
-        unsigned old_local_pred_index = history->localHistory
-                      & localPredictorMask;
-        if (history->globalUsed) {
-           historyPred = history->globalPredTaken;
-        } else {
-           historyPred = history->localPredTaken;
+    unsigned local_history_idx = calcLocHistIdx(branch_addr);
+
+    assert(local_history_idx < localHistoryTableSize);
+
+    // Unconditional branches do not use local history.
+    bool old_local_pred_valid = history->localHistory !=
+            invalidPredictorIndex;
+
+    // If this is a misprediction, restore the speculatively
+    // updated state (global history register and local history)
+    // and update again.
+    if (squashed) {
+        // Global history restore and update
+        globalHistory[tid] = (history->globalHistory << 1) | taken;
+        globalHistory[tid] &= historyRegisterMask;
+
+        // Local history restore and update.
+        if (old_local_pred_valid) {
+            localHistoryTable[local_history_idx] =
+                        (history->localHistory << 1) | taken;
         }
-        if (historyPred != taken || !squashed) {
-            // Update the choice predictor to tell it which one was correct if
-            // there was a prediction.
-            if (history->localPredTaken != history->globalPredTaken) {
-                 // If the local prediction matches the actual outcome,
-                 // decerement the counter.  Otherwise increment the
-                 // counter.
-                 if (history->localPredTaken == taken) {
-                     choiceCtrs[history->globalHistory].decrement();
-                 } else if (history->globalPredTaken == taken) {
-                     choiceCtrs[history->globalHistory].increment();
-                 }
 
-             }
-
-             // Update the counters and local history with the proper
-             // resolution of the branch.  Global history is updated
-             // speculatively and restored upon squash() calls, so it does not
-             // need to be updated.
-             if (taken) {
-                  globalCtrs[history->globalHistory].increment();
-                  if (old_local_pred_index != invalidPredictorIndex) {
-                          localCtrs[old_local_pred_index].increment();
-                  }
-             } else {
-                  globalCtrs[history->globalHistory].decrement();
-                  if (old_local_pred_index != invalidPredictorIndex) {
-                          localCtrs[old_local_pred_index].decrement();
-                  }
-             }
-        }
-        if (squashed) {
-             if (taken) {
-                globalHistory = (history->globalHistory << 1) | 1;
-                globalHistory = globalHistory & globalHistoryMask;
-                if (old_local_pred_index != invalidPredictorIndex) {
-                    localHistoryTable[old_local_pred_index] =
-                     (history->localHistory << 1) | 1;
-                }
-             } else {
-                globalHistory = (history->globalHistory << 1);
-                globalHistory = globalHistory & globalHistoryMask;
-                if (old_local_pred_index != invalidPredictorIndex) {
-                     localHistoryTable[old_local_pred_index] =
-                     history->localHistory << 1;
-                }
-             }
-
-        }
-        // We're done with this history, now delete it.
-        delete history;
-
+        return;
     }
 
-    assert(globalHistory < globalPredictorSize &&
-           local_history_idx < localHistoryTableSize &&
-           local_predictor_idx < localPredictorSize);
+    unsigned old_local_pred_index = history->localHistory &
+        localPredictorMask;
 
+    assert(old_local_pred_index < localPredictorSize);
 
+    // Update the choice predictor to tell it which one was correct if
+    // there was a prediction.
+    if (history->localPredTaken != history->globalPredTaken &&
+        old_local_pred_valid)
+    {
+        // If the local prediction matches the actual outcome,
+        // decrement the counter. Otherwise increment the
+        // counter.
+        unsigned choice_predictor_idx =
+            history->globalHistory & choiceHistoryMask;
+        if (history->localPredTaken == taken) {
+            choiceCtrs[choice_predictor_idx]--;
+        } else if (history->globalPredTaken == taken) {
+            choiceCtrs[choice_predictor_idx]++;
+        }
+    }
+
+    // Update the counters with the proper
+    // resolution of the branch. Histories are updated
+    // speculatively, restored upon squash() calls, and
+    // recomputed upon update(squash = true) calls,
+    // so they do not need to be updated.
+    unsigned global_predictor_idx =
+            history->globalHistory & globalHistoryMask;
+    if (taken) {
+        globalCtrs[global_predictor_idx]++;
+        if (old_local_pred_valid) {
+            localCtrs[old_local_pred_index]++;
+        }
+    } else {
+        globalCtrs[global_predictor_idx]--;
+        if (old_local_pred_valid) {
+            localCtrs[old_local_pred_index]--;
+        }
+    }
+
+    // We're done with this history, now delete it.
+    delete history;
 }
 
 void
-TournamentBP::squash(void *bp_history)
+TournamentBP::squash(ThreadID tid, void *bp_history)
 {
     BPHistory *history = static_cast<BPHistory *>(bp_history);
 
     // Restore global history to state prior to this branch.
-    globalHistory = history->globalHistory;
+    globalHistory[tid] = history->globalHistory;
+
+    // Restore local history
+    if (history->localHistoryIdx != invalidPredictorIndex) {
+        localHistoryTable[history->localHistoryIdx] = history->localHistory;
+    }
 
     // Delete this BPHistory now that we're done with it.
     delete history;
 }
 
-#ifdef DEBUG
+#ifdef GEM5_DEBUG
 int
 TournamentBP::BPHistory::newCount = 0;
 #endif
+
+} // namespace branch_prediction
+} // namespace gem5

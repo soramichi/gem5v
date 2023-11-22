@@ -24,9 +24,6 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * Authors: Steve Reinhardt
- *          Nathan Binkert
  */
 
 #ifndef __BASE_TIME_HH__
@@ -43,8 +40,10 @@
 #include <string>
 
 #include "base/types.hh"
+#include "sim/serialize.hh"
 
-class Checkpoint;
+namespace gem5
+{
 
 class Time
 {
@@ -198,9 +197,8 @@ class Time
     std::string date(const std::string &format = "") const;
     std::string time() const;
 
-    void serialize(const std::string &base, std::ostream &os);
-    void unserialize(const std::string &base, Checkpoint *cp,
-                     const std::string &section);
+    void serialize(const std::string &base, CheckpointOut &cp) const;
+    void unserialize(const std::string &base, CheckpointIn &cp);
 };
 
 void sleep(const Time &time);
@@ -269,5 +267,7 @@ operator<<(std::ostream &out, const Time &time)
 }
 
 time_t mkutctime(struct tm *time);
+
+} // namespace gem5
 
 #endif // __BASE_TIME_HH__

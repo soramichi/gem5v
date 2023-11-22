@@ -24,49 +24,38 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * Authors: Ali Saidi
  */
 
 /** @file
  * BadDevice implemenation
  */
 
-#include <deque>
+#include "dev/baddev.hh"
+
 #include <string>
-#include <vector>
 
 #include "base/trace.hh"
-#include "config/the_isa.hh"
-#include "dev/baddev.hh"
-#include "mem/port.hh"
 #include "params/BadDevice.hh"
 #include "sim/system.hh"
 
-using namespace std;
-
-BadDevice::BadDevice(Params *p)
-    : BasicPioDevice(p), devname(p->devicename)
+namespace gem5
 {
-    pioSize = 0x10;
+
+BadDevice::BadDevice(const Params &p)
+    : BasicPioDevice(p, 0x10), devname(p.devicename)
+{
 }
 
 Tick
 BadDevice::read(PacketPtr pkt)
 {
     panic("Device %s not imlpmented\n", devname);
-    M5_DUMMY_RETURN
 }
 
 Tick
 BadDevice::write(PacketPtr pkt)
 {
     panic("Device %s not imlpmented\n", devname);
-    M5_DUMMY_RETURN
 }
 
-BadDevice *
-BadDeviceParams::create()
-{
-    return new BadDevice(this);
-}
+} // namespace gem5

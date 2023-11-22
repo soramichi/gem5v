@@ -27,19 +27,23 @@
  */
 
 
-#ifndef TYPEDEFINES_H
-#define TYPEDEFINES_H
+#ifndef __MEM_RUBY_COMMON_TYPEDEFINES_HH__
+#define __MEM_RUBY_COMMON_TYPEDEFINES_HH__
 
-typedef unsigned long long uint64;
+#include <string>
 
-typedef long long int64;
+namespace gem5
+{
 
-typedef int64 Time;
-typedef uint64 physical_address_t;
+namespace ruby
+{
 
-typedef int64 Index;            // what the address bit ripper returns
-typedef int LinkID;
-typedef int NodeID;
-typedef int SwitchID;
+typedef unsigned int LinkID;
+typedef unsigned int NodeID;
+typedef unsigned int SwitchID;
+typedef std::string PortDirection;
 
-#endif
+} // namespace ruby
+} // namespace gem5
+
+#endif //__MEM_RUBY_COMMON_TYPEDEFINES_HH__

@@ -24,26 +24,22 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * Authors: Nathan Binkert
- *          Steve Reinhardt
  */
 
+#include "cpu/pc_event.hh"
+
 #include <algorithm>
-#include <map>
 #include <string>
 #include <utility>
 
 #include "base/debug.hh"
 #include "base/trace.hh"
-#include "cpu/base.hh"
-#include "cpu/pc_event.hh"
-#include "cpu/thread_context.hh"
 #include "debug/PCEvent.hh"
-#include "sim/core.hh"
+#include "sim/cur_tick.hh"
 #include "sim/system.hh"
 
-using namespace std;
+namespace gem5
+{
 
 PCEventQueue::PCEventQueue()
 {}
@@ -57,17 +53,15 @@ PCEventQueue::remove(PCEvent *event)
     int removed = 0;
     range_t range = equal_range(event);
     iterator i = range.first;
-    while (i != range.second &&
-           i != pc_map.end()) {
+    while (i != range.second && i != pcMap.end()) {
         if (*i == event) {
             DPRINTF(PCEvent, "PC based event removed at %#x: %s\n",
                     event->pc(), event->descr());
-            i = pc_map.erase(i);
+            i = pcMap.erase(i);
             ++removed;
         } else {
             i++;
         }
-
     }
 
     return removed > 0;
@@ -76,8 +70,8 @@ PCEventQueue::remove(PCEvent *event)
 bool
 PCEventQueue::schedule(PCEvent *event)
 {
-    pc_map.push_back(event);
-    sort(pc_map.begin(), pc_map.end(), MapCompare());
+    pcMap.push_back(event);
+    std::sort(pcMap.begin(), pcMap.end(), MapCompare());
 
     DPRINTF(PCEvent, "PC based event scheduled for %#x: %s\n",
             event->pc(), event->descr());
@@ -86,21 +80,13 @@ PCEventQueue::schedule(PCEvent *event)
 }
 
 bool
-PCEventQueue::doService(ThreadContext *tc)
+PCEventQueue::doService(Addr pc, ThreadContext *tc)
 {
-    // This will fail to break on Alpha PALcode addresses, but that is
-    // a rare use case.
-    Addr pc = tc->instAddr();
+    // Using the raw PC address will fail to break on Alpha PALcode addresses,
+    // but that is a rare use case.
     int serviced = 0;
     range_t range = equal_range(pc);
     for (iterator i = range.first; i != range.second; ++i) {
-        // Make sure that the pc wasn't changed as the side effect of
-        // another event.  This for example, prevents two invocations
-        // of the SkipFuncEvent.  Maybe we should have separate PC
-        // event queues for each processor?
-        if (pc != tc->instAddr())
-            continue;
-
         DPRINTF(PCEvent, "PC based event serviced at %#x: %s\n",
                 (*i)->pc(), (*i)->descr());
 
@@ -114,8 +100,8 @@ PCEventQueue::doService(ThreadContext *tc)
 void
 PCEventQueue::dump() const
 {
-    const_iterator i = pc_map.begin();
-    const_iterator e = pc_map.end();
+    const_iterator i = pcMap.begin();
+    const_iterator e = pcMap.end();
 
     for (; i != e; ++i)
         cprintf("%d: event at %#x: %s\n", curTick(), (*i)->pc(),
@@ -125,37 +111,35 @@ PCEventQueue::dump() const
 PCEventQueue::range_t
 PCEventQueue::equal_range(Addr pc)
 {
-    return std::equal_range(pc_map.begin(), pc_map.end(), pc, MapCompare());
+    return std::equal_range(pcMap.begin(), pcMap.end(), pc, MapCompare());
 }
 
-BreakPCEvent::BreakPCEvent(PCEventQueue *q, const std::string &desc, Addr addr,
+BreakPCEvent::BreakPCEvent(PCEventScope *s, const std::string &desc, Addr addr,
                            bool del)
-    : PCEvent(q, desc, addr), remove(del)
+    : PCEvent(s, desc, addr), remove(del)
 {
 }
 
 void
 BreakPCEvent::process(ThreadContext *tc)
 {
-    StringWrap name(tc->getCpuPtr()->name() + ".break_event");
+    StringWrap name("break_event");
     DPRINTFN("break event %s triggered\n", descr());
-    Debug::breakpoint();
+    debug::breakpoint();
     if (remove)
         delete this;
 }
 
-void
-sched_break_pc_sys(System *sys, Addr addr)
+PanicPCEvent::PanicPCEvent(PCEventScope *s, const std::string &desc, Addr pc)
+    : PCEvent(s, desc, pc)
 {
-    new BreakPCEvent(&sys->pcEventQueue, "debug break", addr, true);
 }
 
 void
-sched_break_pc(Addr addr)
+PanicPCEvent::process(ThreadContext *tc)
 {
-     for (vector<System *>::iterator sysi = System::systemList.begin();
-          sysi != System::systemList.end(); ++sysi) {
-         sched_break_pc_sys(*sysi, addr);
-    }
-
+    StringWrap name("panic_event");
+    panic(descr());
 }
+
+} // namespace gem5

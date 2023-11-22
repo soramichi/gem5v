@@ -1,5 +1,17 @@
 # -*- mode:python -*-
 
+# Copyright (c) 2013, 2015-2020, 2023 ARM Limited
+# All rights reserved.
+#
+# The license below extends only to copyright in the software and shall
+# not be construed as granting a license to any other intellectual
+# property including but not limited to intellectual property relating
+# to a hardware implementation of the functionality of the software
+# licensed hereunder.  You may use the software subject to the license
+# terms below provided that you ensure that this notice is replicated
+# unmodified and in its entirety in all distributions of the software,
+# modified or unmodified, in source code or in binary form.
+#
 # Copyright (c) 2011 Advanced Micro Devices, Inc.
 # Copyright (c) 2009 The Hewlett-Packard Development Company
 # Copyright (c) 2004-2005 The Regents of The University of Michigan
@@ -27,9 +39,6 @@
 # THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-#
-# Authors: Steve Reinhardt
-#          Nathan Binkert
 
 ###################################################
 #
@@ -37,8 +46,8 @@
 #
 # While in this directory ('gem5'), just type 'scons' to build the default
 # configuration (see below), or type 'scons build/<CONFIG>/<binary>'
-# to build some other configuration (e.g., 'build/ALPHA/gem5.opt' for
-# the optimized full-system version).
+# to build some other configuration (e.g., 'build/X86/gem5.opt' for
+# the optimized X86 version).
 #
 # You can build gem5 in a different directory as long as there is a
 # 'build/<CONFIG>' somewhere along the target path.  The build system
@@ -49,15 +58,15 @@
 #
 #   The following two commands are equivalent.  The '-u' option tells
 #   scons to search up the directory tree for this SConstruct file.
-#   % cd <path-to-src>/gem5 ; scons build/ALPHA/gem5.debug
-#   % cd <path-to-src>/gem5/build/ALPHA; scons -u gem5.debug
+#   % cd <path-to-src>/gem5 ; scons build/X86/gem5.debug
+#   % cd <path-to-src>/gem5/build/X86; scons -u gem5.debug
 #
 #   The following two commands are equivalent and demonstrate building
 #   in a directory outside of the source tree.  The '-C' option tells
 #   scons to chdir to the specified directory to find this SConstruct
 #   file.
-#   % cd <path-to-src>/gem5 ; scons /local/foo/build/ALPHA/gem5.debug
-#   % cd /local/foo/build/ALPHA; scons -C <path-to-src>/gem5 gem5.debug
+#   % cd <path-to-src>/gem5 ; scons /local/foo/build/X86/gem5.debug
+#   % cd /local/foo/build/X86; scons -C <path-to-src>/gem5 gem5.debug
 #
 # You can use 'scons -H' to print scons options.  If you're in this
 # 'gem5' directory (or use -u or -C to tell scons where to find this
@@ -66,246 +75,164 @@
 #
 ###################################################
 
-# Check for recent-enough Python and SCons versions.
-try:
-    # Really old versions of scons only take two options for the
-    # function, so check once without the revision and once with the
-    # revision, the first instance will fail for stuff other than
-    # 0.98, and the second will fail for 0.98.0
-    EnsureSConsVersion(0, 98)
-    EnsureSConsVersion(0, 98, 1)
-except SystemExit, e:
-    print """
-For more details, see:
-    http://gem5.org/Dependencies
-"""
-    raise
-
-# We ensure the python version early because we have stuff that
-# requires python 2.4
-try:
-    EnsurePythonVersion(2, 4)
-except SystemExit, e:
-    print """
-You can use a non-default installation of the Python interpreter by
-either (1) rearranging your PATH so that scons finds the non-default
-'python' first or (2) explicitly invoking an alternative interpreter
-on the scons script.
-
-For more details, see:
-    http://gem5.org/wiki/index.php/Using_a_non-default_Python_installation
-"""
-    raise
-
-# Global Python includes
+# Global Python imports
+import atexit
 import os
-import re
-import subprocess
 import sys
 
-from os import mkdir, environ
-from os.path import abspath, basename, dirname, expanduser, normpath
-from os.path import exists,  isdir, isfile
-from os.path import join as joinpath, split as splitpath
+from os import mkdir, remove, environ
+from os.path import abspath, dirname, expanduser
+from os.path import isdir, isfile
+from os.path import join, split
 
-# SCons includes
+import logging
+logging.basicConfig()
+
+# SCons imports
 import SCons
 import SCons.Node
+import SCons.Node.FS
+import SCons.Tool
 
-extra_python_paths = [
-    Dir('src/python').srcnode().abspath, # gem5 includes
-    Dir('ext/ply').srcnode().abspath, # ply is used by several files
-    ]
-
-sys.path[1:1] = extra_python_paths
-
-from m5.util import compareVersions, readCommand
-from m5.util.terminal import get_termcap
-
-help_texts = {
-    "options" : "",
-    "global_vars" : "",
-    "local_vars" : ""
-}
-
-Export("help_texts")
+if getattr(SCons, '__version__', None) in ('3.0.0', '3.0.1'):
+    # Monkey patch a fix which appears in version 3.0.2, since we only
+    # require version 3.0.0
+    def __hash__(self):
+        return hash(self.lstr)
+    import SCons.Subst
+    SCons.Subst.Literal.__hash__ = __hash__
 
 
-# There's a bug in scons in that (1) by default, the help texts from
-# AddOption() are supposed to be displayed when you type 'scons -h'
-# and (2) you can override the help displayed by 'scons -h' using the
-# Help() function, but these two features are incompatible: once
-# you've overridden the help text using Help(), there's no way to get
-# at the help texts from AddOptions.  See:
-#     http://scons.tigris.org/issues/show_bug.cgi?id=2356
-#     http://scons.tigris.org/issues/show_bug.cgi?id=2611
-# This hack lets us extract the help text from AddOptions and
-# re-inject it via Help().  Ideally someday this bug will be fixed and
-# we can just use AddOption directly.
-def AddLocalOption(*args, **kwargs):
-    col_width = 30
+########################################################################
+#
+# Command line options.
+#
+########################################################################
 
-    help = "  " + ", ".join(args)
-    if "help" in kwargs:
-        length = len(help)
-        if length >= col_width:
-            help += "\n" + " " * col_width
-        else:
-            help += " " * (col_width - length)
-        help += kwargs["help"]
-    help_texts["options"] += help + "\n"
+linker_options = ('bfd', 'gold', 'lld', 'mold')
 
-    AddOption(*args, **kwargs)
+AddOption('--no-colors', dest='use_colors', action='store_false',
+          help="Don't add color to abbreviated scons output")
+AddOption('--with-cxx-config', action='store_true',
+          help="Build with support for C++-based configuration")
+AddOption('--default',
+          help='Override which build_opts file to use for defaults')
+AddOption('--ignore-style', action='store_true',
+          help='Disable style checking hooks')
+AddOption('--linker', action='store', default=None, choices=linker_options,
+          help=f'Select which linker to use ({", ".join(linker_options)})')
+AddOption('--gold-linker', action='store_const', const='gold', dest='linker',
+          help='Use the gold linker. Deprecated: Use --linker=gold')
+AddOption('--no-compress-debug', action='store_true',
+          help="Don't compress debug info in build files")
+AddOption('--with-lto', action='store_true',
+          help='Enable Link-Time Optimization')
+AddOption('--verbose', action='store_true',
+          help='Print full tool command lines')
+AddOption('--without-python', action='store_true',
+          help='Build without Python configuration support')
+AddOption('--without-tcmalloc', action='store_true',
+          help='Disable linking against tcmalloc')
+AddOption('--with-ubsan', action='store_true',
+          help='Build with Undefined Behavior Sanitizer if available')
+AddOption('--with-asan', action='store_true',
+          help='Build with Address Sanitizer if available')
+AddOption('--with-systemc-tests', action='store_true',
+          help='Build systemc tests')
+AddOption('--install-hooks', action='store_true',
+          help='Install revision control hooks non-interactively')
+AddOption('--gprof', action='store_true',
+          help='Enable support for the gprof profiler')
+AddOption('--pprof', action='store_true',
+          help='Enable support for the pprof profiler')
+# Default to --no-duplicate-sources, but keep --duplicate-sources to opt-out
+# of this new build behaviour in case it introduces regressions. We could use
+# action=argparse.BooleanOptionalAction here once Python 3.9 is required.
+AddOption('--duplicate-sources', action='store_true', default=False,
+          dest='duplicate_sources',
+          help='Create symlinks to sources in the build directory')
+AddOption('--no-duplicate-sources', action='store_false',
+          dest='duplicate_sources',
+          help='Do not create symlinks to sources in the build directory')
 
-AddLocalOption('--colors', dest='use_colors', action='store_true',
-               help="Add color to abbreviated scons output")
-AddLocalOption('--no-colors', dest='use_colors', action='store_false',
-               help="Don't add color to abbreviated scons output")
-AddLocalOption('--default', dest='default', type='string', action='store',
-               help='Override which build_opts file to use for defaults')
-AddLocalOption('--ignore-style', dest='ignore_style', action='store_true',
-               help='Disable style checking hooks')
-AddLocalOption('--no-lto', dest='no_lto', action='store_true',
-               help='Disable Link-Time Optimization for fast')
-AddLocalOption('--update-ref', dest='update_ref', action='store_true',
-               help='Update test reference outputs')
-AddLocalOption('--verbose', dest='verbose', action='store_true',
-               help='Print full tool command lines')
+# Inject the built_tools directory into the python path.
+sys.path[1:1] = [ Dir('#build_tools').abspath ]
 
-termcap = get_termcap(GetOption('use_colors'))
+# Imports of gem5_scons happen here since it depends on some options which are
+# declared above.
+from gem5_scons import error, warning, summarize_warnings, parse_build_path
+from gem5_scons import TempFileSpawn, EnvDefaults, MakeAction, MakeActionTool
+import gem5_scons
+from gem5_scons.builders import ConfigFile, AddLocalRPATH, SwitchingHeaders
+from gem5_scons.builders import Blob
+from gem5_scons.sources import TagImpliesTool
+from gem5_scons.util import compareVersions, readCommand
+
+# Disable warnings when targets can be built with multiple environments but
+# with the same actions. This can happen intentionally if, for instance, a
+# generated source file is used to build object files in different ways in
+# different environments, but generating the source file itself is exactly the
+# same. This can be re-enabled from the command line if desired.
+SetOption('warn', 'no-duplicate-environment')
+
+Export('MakeAction')
+
+# Patch re.compile to support inline flags anywhere within a RE
+# string. Required to use PLY with Python 3.11+.
+gem5_scons.patch_re_compile_for_inline_flags()
 
 ########################################################################
 #
 # Set up the main build environment.
 #
 ########################################################################
-use_vars = set([ 'AS', 'AR', 'CC', 'CXX', 'HOME', 'LD_LIBRARY_PATH',
-                 'LIBRARY_PATH', 'PATH', 'PYTHONPATH', 'RANLIB', 'SWIG' ])
 
-use_env = {}
-for key,val in os.environ.iteritems():
-    if key in use_vars or key.startswith("M5"):
-        use_env[key] = val
+main = Environment(tools=[
+        'default', 'git', TempFileSpawn, EnvDefaults, MakeActionTool,
+        ConfigFile, AddLocalRPATH, SwitchingHeaders, TagImpliesTool, Blob
+    ])
 
-main = Environment(ENV=use_env)
-main.Decider('MD5-timestamp')
-main.root = Dir(".")         # The current directory (where this file lives).
-main.srcdir = Dir("src")     # The source directory
+main.Tool(SCons.Tool.FindTool(['gcc', 'clang'], main))
+main.Tool(SCons.Tool.FindTool(['g++', 'clang++'], main))
 
-main_dict_keys = main.Dictionary().keys()
+Export('main')
+
+from gem5_scons.util import get_termcap
+termcap = get_termcap()
 
 # Check that we have a C/C++ compiler
-if not ('CC' in main_dict_keys and 'CXX' in main_dict_keys):
-    print "No C++ compiler installed (package g++ on Ubuntu and RedHat)"
-    Exit(1)
+if not ('CC' in main and 'CXX' in main):
+    error("No C++ compiler installed (package g++ on Ubuntu and RedHat)")
 
-# Check that swig is present
-if not 'SWIG' in main_dict_keys:
-    print "swig is not installed (package swig on Ubuntu and RedHat)"
-    Exit(1)
+# Find default configuration & binary.
+Default(environ.get('M5_DEFAULT_BINARY', 'build/ARM/gem5.debug'))
 
-# add useful python code PYTHONPATH so it can be used by subprocesses
-# as well
-main.AppendENVPath('PYTHONPATH', extra_python_paths)
 
 ########################################################################
-#
-# Mercurial Stuff.
-#
-# If the gem5 directory is a mercurial repository, we should do some
-# extra things.
-#
-########################################################################
-
-hgdir = main.root.Dir(".hg")
-
-mercurial_style_message = """
-You're missing the gem5 style hook, which automatically checks your code
-against the gem5 style rules on hg commit and qrefresh commands.  This
-script will now install the hook in your .hg/hgrc file.
-Press enter to continue, or ctrl-c to abort: """
-
-mercurial_style_hook = """
-# The following lines were automatically added by gem5/SConstruct
-# to provide the gem5 style-checking hooks
-[extensions]
-style = %s/util/style.py
-
-[hooks]
-pretxncommit.style = python:style.check_style
-pre-qrefresh.style = python:style.check_style
-# End of SConstruct additions
-
-""" % (main.root.abspath)
-
-mercurial_lib_not_found = """
-Mercurial libraries cannot be found, ignoring style hook.  If
-you are a gem5 developer, please fix this and run the style
-hook. It is important.
-"""
-
-# Check for style hook and prompt for installation if it's not there.
-# Skip this if --ignore-style was specified, there's no .hg dir to
-# install a hook in, or there's no interactive terminal to prompt.
-if not GetOption('ignore_style') and hgdir.exists() and sys.stdin.isatty():
-    style_hook = True
-    try:
-        from mercurial import ui
-        ui = ui.ui()
-        ui.readconfig(hgdir.File('hgrc').abspath)
-        style_hook = ui.config('hooks', 'pretxncommit.style', None) and \
-                     ui.config('hooks', 'pre-qrefresh.style', None)
-    except ImportError:
-        print mercurial_lib_not_found
-
-    if not style_hook:
-        print mercurial_style_message,
-        # continue unless user does ctrl-c/ctrl-d etc.
-        try:
-            raw_input()
-        except:
-            print "Input exception, exiting scons.\n"
-            sys.exit(1)
-        hgrc_path = '%s/.hg/hgrc' % main.root.abspath
-        print "Adding style hook to", hgrc_path, "\n"
-        try:
-            hgrc = open(hgrc_path, 'a')
-            hgrc.write(mercurial_style_hook)
-            hgrc.close()
-        except:
-            print "Error updating", hgrc_path
-            sys.exit(1)
-
-
-###################################################
 #
 # Figure out which configurations to set up based on the path(s) of
 # the target(s).
 #
-###################################################
-
-# Find default configuration & binary.
-#Default(environ.get('M5_DEFAULT_BINARY', 'build/ALPHA/gem5.debug'))
-Default(environ.get('M5_DEFAULT_BINARY', 'build/X86/gem5.debug'))
+########################################################################
 
 # helper function: find last occurrence of element in list
 def rfind(l, elt, offs = -1):
     for i in range(len(l)+offs, 0, -1):
         if l[i] == elt:
             return i
-    raise ValueError, "element not found"
+    raise ValueError("element not found")
 
 # Take a list of paths (or SCons Nodes) and return a list with all
 # paths made absolute and ~-expanded.  Paths will be interpreted
 # relative to the launch directory unless a different root is provided
 def makePathListAbsolute(path_list, root=GetLaunchDir()):
-    return [abspath(joinpath(root, expanduser(str(p))))
+    return [abspath(os.path.join(root, expanduser(str(p))))
             for p in path_list]
 
 # Each target must have 'build' in the interior of the path; the
 # directory below this will determine the build parameters.  For
-# example, for target 'foo/bar/build/ALPHA_SE/arch/alpha/blah.do' we
-# recognize that ALPHA_SE specifies the configuration because it
+# example, for target 'foo/bar/build/X86/arch/x86/blah.do' we
+# recognize that X86 specifies the configuration because it
 # follow 'build' in the build path.
 
 # The funky assignment to "[:]" is needed to replace the list contents
@@ -315,820 +242,577 @@ BUILD_TARGETS[:] = makePathListAbsolute(BUILD_TARGETS)
 
 # Generate a list of the unique build roots and configs that the
 # collected targets reference.
-variant_paths = []
+variant_paths = set()
 build_root = None
 for t in BUILD_TARGETS:
-    path_dirs = t.split('/')
-    try:
-        build_top = rfind(path_dirs, 'build', -2)
-    except:
-        print "Error: no non-leaf 'build' dir found on target path", t
-        Exit(1)
-    this_build_root = joinpath('/',*path_dirs[:build_top+1])
+    this_build_root, variant = parse_build_path(t)
+
+    # Make sure all targets use the same build root.
     if not build_root:
         build_root = this_build_root
-    else:
-        if this_build_root != build_root:
-            print "Error: build targets not under same build root\n"\
-                  "  %s\n  %s" % (build_root, this_build_root)
-            Exit(1)
-    variant_path = joinpath('/',*path_dirs[:build_top+2])
-    if variant_path not in variant_paths:
-        variant_paths.append(variant_path)
+    elif this_build_root != build_root:
+        error("build targets not under same build root\n  %s\n  %s" %
+            (build_root, this_build_root))
+
+    # Collect all the variants into a set.
+    variant_paths.add(os.path.join('/', build_root, variant))
 
 # Make sure build_root exists (might not if this is the first build there)
 if not isdir(build_root):
     mkdir(build_root)
 main['BUILDROOT'] = build_root
 
-Export('main')
 
-main.SConsignFile(joinpath(build_root, "sconsign"))
-
-# Default duplicate option is to use hard links, but this messes up
-# when you use emacs to edit a file in the target dir, as emacs moves
-# file to file~ then copies to file, breaking the link.  Symbolic
-# (soft) links work better.
-main.SetOption('duplicate', 'soft-copy')
-
+########################################################################
 #
-# Set up global sticky variables... these are common to an entire build
-# tree (not specific to a particular build like ALPHA_SE)
+# Set up various paths.
 #
+########################################################################
 
-global_vars_file = joinpath(build_root, 'variables.global')
-
-global_vars = Variables(global_vars_file, args=ARGUMENTS)
-
-global_vars.AddVariables(
-    ('CC', 'C compiler', environ.get('CC', main['CC'])),
-    ('CXX', 'C++ compiler', environ.get('CXX', main['CXX'])),
-    ('SWIG', 'SWIG tool', environ.get('SWIG', main['SWIG'])),
-    ('BATCH', 'Use batch pool for build and tests', False),
-    ('BATCH_CMD', 'Batch pool submission command name', 'qdo'),
-    ('M5_BUILD_CACHE', 'Cache built objects in this directory', False),
-    ('EXTRAS', 'Add extra directories to the compilation', '')
-    )
-
-# Update main environment with values from ARGUMENTS & global_vars_file
-global_vars.Update(main)
-help_texts["global_vars"] += global_vars.GenerateHelpText(main)
-
-# Save sticky variable settings back to current variables file
-global_vars.Save(global_vars_file, main)
-
-# Parse EXTRAS variable to build list of all directories where we're
-# look for sources etc.  This list is exported as extras_dir_list.
-base_dir = main.srcdir.abspath
-if main['EXTRAS']:
-    extras_dir_list = makePathListAbsolute(main['EXTRAS'].split(':'))
-else:
-    extras_dir_list = []
-
+base_dir = Dir('#src').abspath
 Export('base_dir')
-Export('extras_dir_list')
 
 # the ext directory should be on the #includes path
 main.Append(CPPPATH=[Dir('ext')])
 
-def strip_build_path(path, env):
-    path = str(path)
-    variant_base = env['BUILDROOT'] + os.path.sep
-    if path.startswith(variant_base):
-        path = path[len(variant_base):]
-    elif path.startswith('build/'):
-        path = path[6:]
-    return path
+# Add shared top-level headers
+main.Prepend(CPPPATH=Dir('include'))
+if not GetOption('duplicate_sources'):
+    main.Prepend(CPPPATH=Dir('src'))
 
-# Generate a string of the form:
-#   common/path/prefix/src1, src2 -> tgt1, tgt2
-# to print while building.
-class Transform(object):
-    # all specific color settings should be here and nowhere else
-    tool_color = termcap.Normal
-    pfx_color = termcap.Yellow
-    srcs_color = termcap.Yellow + termcap.Bold
-    arrow_color = termcap.Blue + termcap.Bold
-    tgts_color = termcap.Yellow + termcap.Bold
 
-    def __init__(self, tool, max_sources=99):
-        self.format = self.tool_color + (" [%8s] " % tool) \
-                      + self.pfx_color + "%s" \
-                      + self.srcs_color + "%s" \
-                      + self.arrow_color + " -> " \
-                      + self.tgts_color + "%s" \
-                      + termcap.Normal
-        self.max_sources = max_sources
-
-    def __call__(self, target, source, env, for_signature=None):
-        # truncate source list according to max_sources param
-        source = source[0:self.max_sources]
-        def strip(f):
-            return strip_build_path(str(f), env)
-        if len(source) > 0:
-            srcs = map(strip, source)
-        else:
-            srcs = ['']
-        tgts = map(strip, target)
-        # surprisingly, os.path.commonprefix is a dumb char-by-char string
-        # operation that has nothing to do with paths.
-        com_pfx = os.path.commonprefix(srcs + tgts)
-        com_pfx_len = len(com_pfx)
-        if com_pfx:
-            # do some cleanup and sanity checking on common prefix
-            if com_pfx[-1] == ".":
-                # prefix matches all but file extension: ok
-                # back up one to change 'foo.cc -> o' to 'foo.cc -> .o'
-                com_pfx = com_pfx[0:-1]
-            elif com_pfx[-1] == "/":
-                # common prefix is directory path: OK
-                pass
-            else:
-                src0_len = len(srcs[0])
-                tgt0_len = len(tgts[0])
-                if src0_len == com_pfx_len:
-                    # source is a substring of target, OK
-                    pass
-                elif tgt0_len == com_pfx_len:
-                    # target is a substring of source, need to back up to
-                    # avoid empty string on RHS of arrow
-                    sep_idx = com_pfx.rfind(".")
-                    if sep_idx != -1:
-                        com_pfx = com_pfx[0:sep_idx]
-                    else:
-                        com_pfx = ''
-                elif src0_len > com_pfx_len and srcs[0][com_pfx_len] == ".":
-                    # still splitting at file extension: ok
-                    pass
-                else:
-                    # probably a fluke; ignore it
-                    com_pfx = ''
-        # recalculate length in case com_pfx was modified
-        com_pfx_len = len(com_pfx)
-        def fmt(files):
-            f = map(lambda s: s[com_pfx_len:], files)
-            return ', '.join(f)
-        return self.format % (com_pfx, fmt(srcs), fmt(tgts))
-
-Export('Transform')
-
-# enable the regression script to use the termcap
-main['TERMCAP'] = termcap
-
-if GetOption('verbose'):
-    def MakeAction(action, string, *args, **kwargs):
-        return Action(action, *args, **kwargs)
-else:
-    MakeAction = Action
-    main['CCCOMSTR']        = Transform("CC")
-    main['CXXCOMSTR']       = Transform("CXX")
-    main['ASCOMSTR']        = Transform("AS")
-    main['SWIGCOMSTR']      = Transform("SWIG")
-    main['ARCOMSTR']        = Transform("AR", 0)
-    main['LINKCOMSTR']      = Transform("LINK", 0)
-    main['RANLIBCOMSTR']    = Transform("RANLIB", 0)
-    main['M4COMSTR']        = Transform("M4")
-    main['SHCCCOMSTR']      = Transform("SHCC")
-    main['SHCXXCOMSTR']     = Transform("SHCXX")
-Export('MakeAction')
+########################################################################
+#
+# Set command line options based on the configuration of the host and
+# build settings.
+#
+########################################################################
 
 # Initialize the Link-Time Optimization (LTO) flags
 main['LTO_CCFLAGS'] = []
-main['LTO_LDFLAGS'] = []
+main['LTO_LINKFLAGS'] = []
 
-CXX_version = readCommand([main['CXX'],'--version'], exception=False)
-CXX_V = readCommand([main['CXX'],'-V'], exception=False)
+# According to the readme, tcmalloc works best if the compiler doesn't
+# assume that we're using the builtin malloc and friends. These flags
+# are compiler-specific, so we need to set them after we detect which
+# compiler we're using.
+main['TCMALLOC_CCFLAGS'] = []
+
+CXX_version = readCommand([main['CXX'], '--version'], exception=False)
 
 main['GCC'] = CXX_version and CXX_version.find('g++') >= 0
-main['SUNCC'] = CXX_V and CXX_V.find('Sun C++') >= 0
-main['ICC'] = CXX_V and CXX_V.find('Intel') >= 0
 main['CLANG'] = CXX_version and CXX_version.find('clang') >= 0
-if main['GCC'] + main['SUNCC'] + main['ICC'] + main['CLANG'] > 1:
-    print 'Error: How can we have two at the same time?'
-    Exit(1)
+if main['GCC'] + main['CLANG'] > 1:
+    error('Two compilers enabled at once?')
 
-# Set up default C++ compiler flags
-if main['GCC']:
-    main.Append(CCFLAGS=['-pipe'])
-    main.Append(CCFLAGS=['-fno-strict-aliasing'])
-    main.Append(CCFLAGS=['-Wall', '-Wno-sign-compare', '-Wundef', '-Wno-deprecated-declarations', '-Wno-address-of-packed-member'])
-    #main.Append(CCFLAGS=['-Wno-sign-compare', '-Wundef'])
-    # Read the GCC version to check for versions with bugs
-    # Note CCVERSION doesn't work here because it is run with the CC
-    # before we override it from the command line
-    gcc_version = readCommand([main['CXX'], '-dumpversion'], exception=False)
-    main['GCC_VERSION'] = gcc_version
-    if not compareVersions(gcc_version, '4.4.1') or \
-       not compareVersions(gcc_version, '4.4.2'):
-        print 'Info: Tree vectorizer in GCC 4.4.1 & 4.4.2 is buggy, disabling.'
-        main.Append(CCFLAGS=['-fno-tree-vectorize'])
-    # c++0x support in gcc is useful already from 4.4, see
-    # http://gcc.gnu.org/projects/cxx0x.html for details
-    if compareVersions(gcc_version, '4.4') >= 0:
-        main.Append(CXXFLAGS=['-std=c++0x'])
+# Find the gem5 binary target architecture (usually host architecture). The
+# "Target: <target>" is consistent accross gcc and clang at the time of
+# writting this.
+bin_target_arch = readCommand([main['CXX'], '--verbose'], exception=False)
+main["BIN_TARGET_ARCH"] = (
+    "x86_64"
+    if bin_target_arch.find("Target: x86_64") != -1
+    else "aarch64"
+    if bin_target_arch.find("Target: aarch64") != -1
+    else "unknown"
+)
 
-    # LTO support is only really working properly from 4.6 and beyond
-    if compareVersions(gcc_version, '4.6') >= 0:
-        # Add the appropriate Link-Time Optimization (LTO) flags
-        # unless LTO is explicitly turned off. Note that these flags
-        # are only used by the fast target.
-        if not GetOption('no_lto'):
-            # Pass the LTO flag when compiling to produce GIMPLE
-            # output, we merely create the flags here and only append
-            # them later/
-            main['LTO_CCFLAGS'] = ['-flto=%d' % GetOption('num_jobs')]
-
-            # Use the same amount of jobs for LTO as we are running
-            # scons with, we hardcode the use of the linker plugin
-            # which requires either gold or GNU ld >= 2.21
-            main['LTO_LDFLAGS'] = ['-flto=%d' % GetOption('num_jobs'),
-                                   '-fuse-linker-plugin']
-
-elif main['ICC']:
-    pass #Fix me... add warning flags once we clean up icc warnings
-elif main['SUNCC']:
-    main.Append(CCFLAGS=['-Qoption ccfe'])
-    main.Append(CCFLAGS=['-features=gcc'])
-    main.Append(CCFLAGS=['-features=extensions'])
-    main.Append(CCFLAGS=['-library=stlport4'])
-    main.Append(CCFLAGS=['-xar'])
-    #main.Append(CCFLAGS=['-instances=semiexplicit'])
-elif main['CLANG']:
-    clang_version_re = re.compile(".* version (\d+\.\d+)")
-    clang_version_match = clang_version_re.match(CXX_version)
-    if (clang_version_match):
-        clang_version = clang_version_match.groups()[0]
-        if compareVersions(clang_version, "2.9") < 0:
-            print 'Error: clang version 2.9 or newer required.'
-            print '       Installed version:', clang_version
-            Exit(1)
-    else:
-        print 'Error: Unable to determine clang version.'
-        Exit(1)
-
-    main.Append(CCFLAGS=['-pipe'])
-    main.Append(CCFLAGS=['-fno-strict-aliasing'])
-    main.Append(CCFLAGS=['-Wall', '-Wno-sign-compare', '-Wundef'])
-    main.Append(CCFLAGS=['-Wno-tautological-compare'])
-    main.Append(CCFLAGS=['-Wno-self-assign'])
-    # Ruby makes frequent use of extraneous parantheses in the printing
-    # of if-statements
-    main.Append(CCFLAGS=['-Wno-parentheses'])
-
-    # clang 2.9 does not play well with c++0x as it ships with C++
-    # headers that produce errors, this was fixed in 3.0
-    if compareVersions(clang_version, "3") >= 0:
-        main.Append(CXXFLAGS=['-std=c++0x'])
-else:
-    print termcap.Yellow + termcap.Bold + 'Error' + termcap.Normal,
-    print "Don't know what compiler options to use for your compiler."
-    print termcap.Yellow + '       compiler:' + termcap.Normal, main['CXX']
-    print termcap.Yellow + '       version:' + termcap.Normal,
-    if not CXX_version:
-        print termcap.Yellow + termcap.Bold + "COMMAND NOT FOUND!" +\
-               termcap.Normal
-    else:
-        print CXX_version.replace('\n', '<nl>')
-    print "       If you're trying to use a compiler other than GCC, ICC, SunCC,"
-    print "       or clang, there appears to be something wrong with your"
-    print "       environment."
-    print "       "
-    print "       If you are trying to use a compiler other than those listed"
-    print "       above you will need to ease fix SConstruct and "
-    print "       src/SConscript to support that compiler."
-    Exit(1)
-
-# Set up common yacc/bison flags (needed for Ruby)
-main['YACCFLAGS'] = '-d'
-main['YACCHXXFILESUFFIX'] = '.hh'
-
-# Do this after we save setting back, or else we'll tack on an
-# extra 'qdo' every time we run scons.
-if main['BATCH']:
-    main['CC']     = main['BATCH_CMD'] + ' ' + main['CC']
-    main['CXX']    = main['BATCH_CMD'] + ' ' + main['CXX']
-    main['AS']     = main['BATCH_CMD'] + ' ' + main['AS']
-    main['AR']     = main['BATCH_CMD'] + ' ' + main['AR']
-    main['RANLIB'] = main['BATCH_CMD'] + ' ' + main['RANLIB']
-
-if sys.platform == 'cygwin':
-    # cygwin has some header file issues...
-    main.Append(CCFLAGS=["-Wno-uninitialized"])
-
-# Check for SWIG
-if not main.has_key('SWIG'):
-    print 'Error: SWIG utility not found.'
-    print '       Please install (see http://www.swig.org) and retry.'
-    Exit(1)
-
-# Check for appropriate SWIG version
-swig_version = readCommand([main['SWIG'], '-version'], exception='').split()
-# First 3 words should be "SWIG Version x.y.z"
-if len(swig_version) < 3 or \
-        swig_version[0] != 'SWIG' or swig_version[1] != 'Version':
-    print 'Error determining SWIG version.'
-    Exit(1)
-
-min_swig_version = '1.3.34'
-if compareVersions(swig_version[2], min_swig_version) < 0:
-    print 'Error: SWIG version', min_swig_version, 'or newer required.'
-    print '       Installed version:', swig_version[2]
-    Exit(1)
-
-# Set up SWIG flags & scanner
-swig_flags=Split('-c++ -python -modern -templatereduce $_CPPINCFLAGS')
-main.Append(SWIGFLAGS=swig_flags)
-
-# filter out all existing swig scanners, they mess up the dependency
-# stuff for some reason
-scanners = []
-for scanner in main['SCANNERS']:
-    skeys = scanner.skeys
-    if skeys == '.i':
-        continue
-
-    if isinstance(skeys, (list, tuple)) and '.i' in skeys:
-        continue
-
-    scanners.append(scanner)
-
-# add the new swig scanner that we like better
-from SCons.Scanner import ClassicCPP as CPPScanner
-swig_inc_re = '^[ \t]*[%,#][ \t]*(?:include|import)[ \t]*(<|")([^>"]+)(>|")'
-scanners.append(CPPScanner("SwigScan", [ ".i" ], "CPPPATH", swig_inc_re))
-
-# replace the scanners list that has what we want
-main['SCANNERS'] = scanners
-
-# Add a custom Check function to the Configure context so that we can
-# figure out if the compiler adds leading underscores to global
-# variables.  This is needed for the autogenerated asm files that we
-# use for embedding the python code.
-def CheckLeading(context):
-    context.Message("Checking for leading underscore in global variables...")
-    # 1) Define a global variable called x from asm so the C compiler
-    #    won't change the symbol at all.
-    # 2) Declare that variable.
-    # 3) Use the variable
-    #
-    # If the compiler prepends an underscore, this will successfully
-    # link because the external symbol 'x' will be called '_x' which
-    # was defined by the asm statement.  If the compiler does not
-    # prepend an underscore, this will not successfully link because
-    # '_x' will have been defined by assembly, while the C portion of
-    # the code will be trying to use 'x'
-    ret = context.TryLink('''
-        asm(".globl _x; _x: .byte 0");
-        extern int x;
-        int main() { return x; }
-        ''', extension=".c")
-    context.env.Append(LEADING_UNDERSCORE=ret)
-    context.Result(ret)
-    return ret
-
-# Test for the presence of C++11 static asserts. If the compiler lacks
-# support for static asserts, base/compiler.hh enables a macro that
-# removes any static asserts in the code.
-def CheckStaticAssert(context):
-    context.Message("Checking for C++11 static_assert support...")
-    ret = context.TryCompile('''
-        static_assert(1, "This assert is always true");
-        ''', extension=".cc")
-    context.env.Append(HAVE_STATIC_ASSERT=ret)
-    context.Result(ret)
-    return ret
-
-# Platform-specific configuration.  Note again that we assume that all
-# builds under a given build root run on the same host platform.
-conf = Configure(main,
-                 conf_dir = joinpath(build_root, '.scons_config'),
-                 log_file = joinpath(build_root, 'scons_config.log'),
-                 custom_tests = { 'CheckLeading' : CheckLeading,
-                                  'CheckStaticAssert' : CheckStaticAssert,
-                                })
-
-# Check for leading underscores.  Don't really need to worry either
-# way so don't need to check the return code.
-conf.CheckLeading()
-
-# Check for C++11 features we want to use if they exist
-conf.CheckStaticAssert()
-
-# Check if we should compile a 64 bit binary on Mac OS X/Darwin
-try:
-    import platform
-    uname = platform.uname()
-    if uname[0] == 'Darwin' and compareVersions(uname[2], '9.0.0') >= 0:
-        if int(readCommand('sysctl -n hw.cpu64bit_capable')[0]):
-            main.Append(CCFLAGS=['-arch', 'x86_64'])
-            main.Append(CFLAGS=['-arch', 'x86_64'])
-            main.Append(LINKFLAGS=['-arch', 'x86_64'])
-            main.Append(ASFLAGS=['-arch', 'x86_64'])
-except:
-    pass
-
-# Recent versions of scons substitute a "Null" object for Configure()
-# when configuration isn't necessary, e.g., if the "--help" option is
-# present.  Unfortuantely this Null object always returns false,
-# breaking all our configuration checks.  We replace it with our own
-# more optimistic null object that returns True instead.
-if not conf:
-    def NullCheck(*args, **kwargs):
-        return True
-
-    class NullConf:
-        def __init__(self, env):
-            self.env = env
-        def Finish(self):
-            return self.env
-        def __getattr__(self, mname):
-            return NullCheck
-
-    conf = NullConf(main)
-
-# Find Python include and library directories for embedding the
-# interpreter.  For consistency, we will use the same Python
-# installation used to run scons (and thus this script).  If you want
-# to link in an alternate version, see above for instructions on how
-# to invoke scons with a different copy of the Python interpreter.
-from distutils import sysconfig
-
-py_getvar = sysconfig.get_config_var
-
-py_debug = getattr(sys, 'pydebug', False)
-py_version = 'python' + py_getvar('VERSION') + (py_debug and "_d" or "")
-
-py_general_include = sysconfig.get_python_inc()
-py_platform_include = sysconfig.get_python_inc(plat_specific=True)
-py_includes = [ py_general_include ]
-if py_platform_include != py_general_include:
-    py_includes.append(py_platform_include)
-
-py_lib_path = [ py_getvar('LIBDIR') ]
-# add the prefix/lib/pythonX.Y/config dir, but only if there is no
-# shared library in prefix/lib/.
-if not py_getvar('Py_ENABLE_SHARED'):
-    py_lib_path.append(py_getvar('LIBPL'))
-
-py_libs = []
-for lib in py_getvar('LIBS').split() + py_getvar('SYSLIBS').split():
-    if not lib.startswith('-l'):
-        # Python requires some special flags to link (e.g. -framework
-        # common on OS X systems), assume appending preserves order
-        main.Append(LINKFLAGS=[lib])
-    else:
-        lib = lib[2:]
-        if lib not in py_libs:
-            py_libs.append(lib)
-py_libs.append(py_version)
-
-main.Append(CPPPATH=py_includes)
-main.Append(LIBPATH=py_lib_path)
-
-# Cache build files in the supplied directory.
-if main['M5_BUILD_CACHE']:
-    print 'Using build cache located at', main['M5_BUILD_CACHE']
-    CacheDir(main['M5_BUILD_CACHE'])
-
-
-# verify that this stuff works
-if not conf.CheckHeader('Python.h', '<>'):
-    print "Error: can't find Python.h header in", py_includes
-    print "Install Python headers (package python-dev on Ubuntu and RedHat)"
-    Exit(1)
-
-for lib in py_libs:
-    if not conf.CheckLib(lib):
-        print "Error: can't find library %s required by python" % lib
-        Exit(1)
-
-# On Solaris you need to use libsocket for socket ops
-#if not conf.CheckLibWithHeader(None, 'sys/socket.h', 'C++', 'accept(0,0,0);'):
-#   if not conf.CheckLibWithHeader('socket', 'sys/socket.h', 'C++', 'accept(0,0,0);'):
-#       print "Can't find library with socket calls (e.g. accept())"
-#       Exit(1)
-
-# Check for zlib.  If the check passes, libz will be automatically
-# added to the LIBS environment variable.
-if not conf.CheckLibWithHeader('z', 'zlib.h', 'C++','zlibVersion();'):
-    print 'Error: did not find needed zlib compression library '\
-          'and/or zlib.h header file.'
-    print '       Please install zlib and try again.'
-    Exit(1)
-
-# Check for librt.
-have_posix_clock = \
-    conf.CheckLibWithHeader(None, 'time.h', 'C',
-                            'clock_nanosleep(0,0,NULL,NULL);') or \
-    conf.CheckLibWithHeader('rt', 'time.h', 'C',
-                            'clock_nanosleep(0,0,NULL,NULL);')
-
-if conf.CheckLib('tcmalloc_minimal'):
-    have_tcmalloc = True
-else:
-    have_tcmalloc = False
-    print termcap.Yellow + termcap.Bold + \
-          "You can get a 12% performance improvement by installing tcmalloc "\
-          "(libgoogle-perftools-dev package on Ubuntu or RedHat)." + \
-          termcap.Normal
-
-if not have_posix_clock:
-    print "Can't find library for POSIX clocks."
-
-# Check for <fenv.h> (C99 FP environment control)
-have_fenv = conf.CheckHeader('fenv.h', '<>')
-if not have_fenv:
-    print "Warning: Header file <fenv.h> not found."
-    print "         This host has no IEEE FP rounding mode control."
-
-######################################################################
+########################################################################
 #
-# Finish the configuration
+# Detect and configure external dependencies.
 #
-main = conf.Finish()
+########################################################################
 
-######################################################################
+main['USE_PYTHON'] = not GetOption('without_python')
+
+def config_embedded_python(env):
+    # Find Python include and library directories for embedding the
+    # interpreter. We rely on python-config to resolve the appropriate
+    # includes and linker flags. If you want to link in an alternate version
+    # of python, override the PYTHON_CONFIG variable.
+
+    python_config = env.Detect(env['PYTHON_CONFIG'])
+    if python_config is None:
+        error("Can't find a suitable python-config, tried "
+              f"{env['PYTHON_CONFIG']}")
+
+    print(f"Info: Using Python config: {python_config}")
+
+    cmd = [python_config, '--ldflags', '--includes']
+
+    # Starting in Python 3.8 the --embed flag is required. Use it if supported.
+    with gem5_scons.Configure(env) as conf:
+        if conf.TryAction(f'@{python_config} --embed')[0]:
+            cmd.append('--embed')
+
+    def flag_filter(env, cmd_output, unique=True):
+        # Since this function does not use the `unique` param, one should not
+        # pass any value to this param.
+        assert(unique==True)
+        flags = cmd_output.split()
+        prefixes = ('-l', '-L', '-I')
+        is_useful = lambda x: any(x.startswith(prefix) for prefix in prefixes)
+        useful_flags = list(filter(is_useful, flags))
+        env.MergeFlags(' '.join(useful_flags))
+
+    env.ParseConfig(cmd, flag_filter)
+
+    env.Prepend(CPPPATH=Dir('ext/pybind11/include/'))
+
+    with gem5_scons.Configure(env) as conf:
+        # verify that this stuff works
+        if not conf.CheckHeader('Python.h', '<>'):
+            error("Check failed for Python.h header.\n",
+                  "Two possible reasons:\n"
+                  "1. Python headers are not installed (You can install the "
+                  "package python-dev on Ubuntu and RedHat)\n"
+                  "2. SCons is using a wrong C compiler. This can happen if "
+                  "CC has the wrong value.\n"
+                  f"CC = {env['CC']}")
+        py_version = conf.CheckPythonLib()
+        if not py_version:
+            error("Can't find a working Python installation")
+
+    # Found a working Python installation. Check if it meets minimum
+    # requirements.
+    ver_string = '.'.join(map(str, py_version))
+    if py_version[0] < 3 or (py_version[0] == 3 and py_version[1] < 6):
+        error('Embedded python library 3.6 or newer required, found '
+              f'{ver_string}.')
+    elif py_version[0] > 3:
+        warning('Embedded python library too new. '
+                f'Python 3 expected, found {ver_string}.')
+
+
+########################################################################
 #
-# Collect all non-global variables
+# Define build environments for required variants.
 #
-
-# Define the universe of supported ISAs
-all_isa_list = [ ]
-Export('all_isa_list')
-
-class CpuModel(object):
-    '''The CpuModel class encapsulates everything the ISA parser needs to
-    know about a particular CPU model.'''
-
-    # Dict of available CPU model objects.  Accessible as CpuModel.dict.
-    dict = {}
-    list = []
-    defaults = []
-
-    # Constructor.  Automatically adds models to CpuModel.dict.
-    def __init__(self, name, filename, includes, strings, default=False):
-        self.name = name           # name of model
-        self.filename = filename   # filename for output exec code
-        self.includes = includes   # include files needed in exec file
-        # The 'strings' dict holds all the per-CPU symbols we can
-        # substitute into templates etc.
-        self.strings = strings
-
-        # This cpu is enabled by default
-        self.default = default
-
-        # Add self to dict
-        if name in CpuModel.dict:
-            raise AttributeError, "CpuModel '%s' already registered" % name
-        CpuModel.dict[name] = self
-        CpuModel.list.append(name)
-
-Export('CpuModel')
-
-# Sticky variables get saved in the variables file so they persist from
-# one invocation to the next (unless overridden, in which case the new
-# value becomes sticky).
-sticky_vars = Variables(args=ARGUMENTS)
-Export('sticky_vars')
-
-# Sticky variables that should be exported
-export_vars = []
-Export('export_vars')
-
-# For Ruby
-all_protocols = []
-Export('all_protocols')
-protocol_dirs = []
-Export('protocol_dirs')
-slicc_includes = []
-Export('slicc_includes')
-
-# Walk the tree and execute all SConsopts scripts that wil add to the
-# above variables
-if not GetOption('verbose'):
-    print "Reading SConsopts"
-for bdir in [ base_dir ] + extras_dir_list:
-    if not isdir(bdir):
-        print "Error: directory '%s' does not exist" % bdir
-        Exit(1)
-    for root, dirs, files in os.walk(bdir):
-        if 'SConsopts' in files:
-            if GetOption('verbose'):
-                print "Reading", joinpath(root, 'SConsopts')
-            SConscript(joinpath(root, 'SConsopts'))
-
-all_isa_list.sort()
-
-sticky_vars.AddVariables(
-    EnumVariable('TARGET_ISA', 'Target ISA', 'alpha', all_isa_list),
-    ListVariable('CPU_MODELS', 'CPU models',
-                 sorted(n for n,m in CpuModel.dict.iteritems() if m.default),
-                 sorted(CpuModel.list)),
-    BoolVariable('EFENCE', 'Link with Electric Fence malloc debugger',
-                 False),
-    BoolVariable('SS_COMPATIBLE_FP',
-                 'Make floating-point results compatible with SimpleScalar',
-                 False),
-    BoolVariable('USE_SSE2',
-                 'Compile for SSE2 (-msse2) to get IEEE FP on x86 hosts',
-                 False),
-    BoolVariable('USE_POSIX_CLOCK', 'Use POSIX Clocks', have_posix_clock),
-    BoolVariable('USE_FENV', 'Use <fenv.h> IEEE mode control', have_fenv),
-    BoolVariable('CP_ANNOTATE', 'Enable critical path annotation capability', False),
-    EnumVariable('PROTOCOL', 'Coherence protocol for Ruby', 'None',
-                  all_protocols),
-    )
-
-# These variables get exported to #defines in config/*.hh (see src/SConscript).
-export_vars += ['USE_FENV', 'SS_COMPATIBLE_FP',
-                'TARGET_ISA', 'CP_ANNOTATE', 'USE_POSIX_CLOCK', 'PROTOCOL',
-                'HAVE_STATIC_ASSERT']
-
-###################################################
-#
-# Define a SCons builder for configuration flag headers.
-#
-###################################################
-
-# This function generates a config header file that #defines the
-# variable symbol to the current variable setting (0 or 1).  The source
-# operands are the name of the variable and a Value node containing the
-# value of the variable.
-def build_config_file(target, source, env):
-    (variable, value) = [s.get_contents() for s in source]
-    f = file(str(target[0]), 'w')
-    print >> f, '#define', variable, value
-    f.close()
-    return None
-
-# Combine the two functions into a scons Action object.
-config_action = MakeAction(build_config_file, Transform("CONFIG H", 2))
-
-# The emitter munges the source & target node lists to reflect what
-# we're really doing.
-def config_emitter(target, source, env):
-    # extract variable name from Builder arg
-    variable = str(target[0])
-    # True target is config header file
-    target = joinpath('config', variable.lower() + '.hh')
-    val = env[variable]
-    if isinstance(val, bool):
-        # Force value to 0/1
-        val = int(val)
-    elif isinstance(val, str):
-        val = '"' + val + '"'
-
-    # Sources are variable name & value (packaged in SCons Value nodes)
-    return ([target], [Value(variable), Value(val)])
-
-config_builder = Builder(emitter = config_emitter, action = config_action)
-
-main.Append(BUILDERS = { 'ConfigFile' : config_builder })
-
-# libelf build is shared across all configs in the build root.
-main.SConscript('ext/libelf/SConscript',
-                variant_dir = joinpath(build_root, 'libelf'))
-
-# gzstream build is shared across all configs in the build root.
-main.SConscript('ext/gzstream/SConscript',
-                variant_dir = joinpath(build_root, 'gzstream'))
-
-###################################################
-#
-# This function is used to set up a directory with switching headers
-#
-###################################################
-
-main['ALL_ISA_LIST'] = all_isa_list
-def make_switching_dir(dname, switch_headers, env):
-    # Generate the header.  target[0] is the full path of the output
-    # header to generate.  'source' is a dummy variable, since we get the
-    # list of ISAs from env['ALL_ISA_LIST'].
-    def gen_switch_hdr(target, source, env):
-        fname = str(target[0])
-        f = open(fname, 'w')
-        isa = env['TARGET_ISA'].lower()
-        print >>f, '#include "%s/%s/%s"' % (dname, isa, basename(fname))
-        f.close()
-
-    # Build SCons Action object. 'varlist' specifies env vars that this
-    # action depends on; when env['ALL_ISA_LIST'] changes these actions
-    # should get re-executed.
-    switch_hdr_action = MakeAction(gen_switch_hdr,
-                          Transform("GENERATE"), varlist=['ALL_ISA_LIST'])
-
-    # Instantiate actions for each header
-    for hdr in switch_headers:
-        env.Command(hdr, [], switch_hdr_action)
-Export('make_switching_dir')
-
-###################################################
-#
-# Define build environments for selected configurations.
-#
-###################################################
+########################################################################
 
 for variant_path in variant_paths:
-    print "Building in", variant_path
-
     # Make a copy of the build-root environment to use for this config.
     env = main.Clone()
     env['BUILDDIR'] = variant_path
 
+    gem5_build = os.path.join(build_root, variant_path, 'gem5.build')
+    env['GEM5BUILD'] = gem5_build
+    Execute(Mkdir(gem5_build))
+
+    env.SConsignFile(os.path.join(gem5_build, 'sconsign'))
+
+    # Set up default C++ compiler flags
+    if env['GCC'] or env['CLANG']:
+        # As gcc and clang share many flags, do the common parts here
+        env.Append(CCFLAGS=['-pipe'])
+        env.Append(CCFLAGS=['-fno-strict-aliasing'])
+
+        # Enable -Wall and -Wextra and then disable the few warnings that
+        # we consistently violate
+        env.Append(CCFLAGS=['-Wall', '-Wundef', '-Wextra',
+                            '-Wno-sign-compare', '-Wno-unused-parameter'])
+
+        # We always compile using C++17
+        env.Append(CXXFLAGS=['-std=c++17'])
+
+        if sys.platform.startswith('freebsd'):
+            env.Append(CCFLAGS=['-I/usr/local/include'])
+            env.Append(CXXFLAGS=['-I/usr/local/include'])
+            # On FreeBSD we need libthr.
+            env.Append(LIBS=['thr'])
+
+        with gem5_scons.Configure(env) as conf:
+            conf.CheckLinkFlag('-Wl,--as-needed')
+
+        linker = GetOption('linker')
+        if linker:
+            with gem5_scons.Configure(env) as conf:
+                if not conf.CheckLinkFlag(f'-fuse-ld={linker}'):
+                    # check mold support for gcc older than 12.1.0
+                    if linker == 'mold' and \
+                       (env['GCC'] and \
+                           compareVersions(env['CXXVERSION'],
+                                           "12.1.0") < 0) and \
+                       ((isdir('/usr/libexec/mold') and \
+                           conf.CheckLinkFlag('-B/usr/libexec/mold')) or \
+                       (isdir('/usr/local/libexec/mold') and \
+                           conf.CheckLinkFlag('-B/usr/local/libexec/mold'))):
+                        pass # support mold
+                    else:
+                        error(f'Linker "{linker}" is not supported')
+                if linker == 'gold' and not GetOption('with_lto'):
+                    # Tell the gold linker to use threads. The gold linker
+                    # segfaults if both threads and LTO are enabled.
+                    conf.CheckLinkFlag('-Wl,--threads')
+                    conf.CheckLinkFlag(
+                            '-Wl,--thread-count=%d' % GetOption('num_jobs'))
+
+
+    else:
+        error('\n'.join((
+              "Don't know what compiler options to use for your compiler.",
+              "compiler: " + env['CXX'],
+              "version: " + CXX_version.replace('\n', '<nl>') if
+                    CXX_version else 'COMMAND NOT FOUND!',
+              "If you're trying to use a compiler other than GCC",
+              "or clang, there appears to be something wrong with your",
+              "environment.",
+              "",
+              "If you are trying to use a compiler other than those listed",
+              "above you will need to ease fix SConstruct and ",
+              "src/SConscript to support that compiler.")))
+
+    if env['GCC']:
+        if compareVersions(env['CXXVERSION'], "7") < 0:
+            error('gcc version 7 or newer required.\n'
+                  'Installed version:', env['CXXVERSION'])
+
+        # Add the appropriate Link-Time Optimization (LTO) flags if
+        # `--with-lto` is set.
+        if GetOption('with_lto'):
+            # g++ uses "make" to parallelize LTO. The program can be overriden
+            # with the environment variable "MAKE", but we currently make no
+            # attempt to plumb that variable through.
+            parallelism = ''
+            if env.Detect('make'):
+                parallelism = '=%d' % GetOption('num_jobs')
+            else:
+                warning('"make" not found, link time optimization will be '
+                        'single threaded.')
+
+            for var in 'LTO_CCFLAGS', 'LTO_LINKFLAGS':
+                # Use the same amount of jobs for LTO as scons.
+                env[var] = ['-flto%s' % parallelism]
+
+        env.Append(TCMALLOC_CCFLAGS=[
+            '-fno-builtin-malloc', '-fno-builtin-calloc',
+            '-fno-builtin-realloc', '-fno-builtin-free'])
+
+        if compareVersions(env['CXXVERSION'], "9") < 0:
+            # `libstdc++fs`` must be explicitly linked for `std::filesystem``
+            # in GCC version 8. As of GCC version 9, this is not required.
+            #
+            # In GCC 7 the `libstdc++fs`` library explicit linkage is also
+            # required but the `std::filesystem` is under the `experimental`
+            # namespace(`std::experimental::filesystem`).
+            #
+            # Note: gem5 does not support GCC versions < 7.
+            env.Append(LIBS=['stdc++fs'])
+
+    elif env['CLANG']:
+        if compareVersions(env['CXXVERSION'], "6") < 0:
+            error('clang version 6 or newer required.\n'
+                  'Installed version:', env['CXXVERSION'])
+
+        # Set the Link-Time Optimization (LTO) flags if enabled.
+        if GetOption('with_lto'):
+            for var in 'LTO_CCFLAGS', 'LTO_LINKFLAGS':
+                env[var] = ['-flto']
+
+        # clang has a few additional warnings that we disable.
+        with gem5_scons.Configure(env) as conf:
+            conf.CheckCxxFlag('-Wno-c99-designator')
+            conf.CheckCxxFlag('-Wno-defaulted-function-deleted')
+
+        env.Append(TCMALLOC_CCFLAGS=['-fno-builtin'])
+
+        if compareVersions(env['CXXVERSION'], "11") < 0:
+            # `libstdc++fs`` must be explicitly linked for `std::filesystem``
+            # in clang versions 6 through 10.
+            #
+            # In addition, for these versions, the
+            # `std::filesystem` is under the `experimental`
+            # namespace(`std::experimental::filesystem`).
+            #
+            # Note: gem5 does not support clang versions < 6.
+            env.Append(LIBS=['stdc++fs'])
+
+
+        # On Mac OS X/Darwin we need to also use libc++ (part of XCode) as
+        # opposed to libstdc++, as the later is dated.
+        if sys.platform == "darwin":
+            env.Append(CXXFLAGS=['-stdlib=libc++'])
+            env.Append(LIBS=['c++'])
+
+    # Add sanitizers flags
+    sanitizers=[]
+    if GetOption('with_ubsan'):
+        sanitizers.append('undefined')
+    if GetOption('with_asan'):
+        # Available for gcc >= 5 or llvm >= 3.1 both a requirement
+        # by the build system
+        sanitizers.append('address')
+        suppressions_file = Dir('util').File('lsan-suppressions').get_abspath()
+        suppressions_opt = 'suppressions=%s' % suppressions_file
+        suppressions_opts = ':'.join([suppressions_opt,
+                                      'print_suppressions=0'])
+        env['ENV']['LSAN_OPTIONS'] = suppressions_opts
+        print()
+        warning('To suppress false positive leaks, set the LSAN_OPTIONS '
+                'environment variable to "%s" when running gem5' %
+                suppressions_opts)
+        warning('LSAN_OPTIONS=%s' % suppressions_opts)
+        print()
+    if sanitizers:
+        sanitizers = ','.join(sanitizers)
+        if env['GCC'] or env['CLANG']:
+            env.Append(CCFLAGS=['-fsanitize=%s' % sanitizers,
+                                 '-fno-omit-frame-pointer'],
+                        LINKFLAGS=['-fsanitize=%s' % sanitizers,
+                                   '-static-libasan'])
+
+            if main["BIN_TARGET_ARCH"] == "x86_64":
+                # Sanitizers can enlarge binary size drammatically, north of
+                # 2GB.  This can prevent successful linkage due to symbol
+                # relocation outside from the 2GB region allocated by the small
+                # x86_64 code model that is enabled by default (32-bit relative
+                # offset limitation).  Switching to the medium model in x86_64
+                # enables 64-bit relative offset for large objects (>64KB by
+                # default) while sticking to 32-bit relative addressing for
+                # code and smaller objects. Note this comes at a potential
+                # performance cost so it should not be enabled in all cases.
+                # This should still be a very happy medium for
+                # non-perf-critical sanitized builds.
+                env.Append(CCFLAGS='-mcmodel=medium')
+                env.Append(LINKFLAGS='-mcmodel=medium')
+            elif main["BIN_TARGET_ARCH"] == "aarch64":
+                # aarch64 default code model is small but with different
+                # constrains than for x86_64. With aarch64, the small code
+                # model enables 4GB distance between symbols. This is
+                # sufficient for the largest ALL/gem5.debug target with all
+                # sanitizers enabled at the time of writting this. Note that
+                # the next aarch64 code model is "large" which prevents dynamic
+                # linkage so it should be avoided when possible.
+                pass
+            else:
+                warning(
+                    "Unknown code model options for your architecture. "
+                    "Linkage might fail for larger binaries "
+                    "(e.g., ALL/gem5.debug with sanitizers enabled)."
+                )
+        else:
+            warning("Don't know how to enable %s sanitizer(s) for your "
+                    "compiler." % sanitizers)
+
+    if sys.platform == 'cygwin':
+        # cygwin has some header file issues...
+        env.Append(CCFLAGS=["-Wno-uninitialized"])
+
+
+    if not GetOption('no_compress_debug'):
+        with gem5_scons.Configure(env) as conf:
+            if not conf.CheckCxxFlag('-gz'):
+                warning("Can't enable object file debug section compression")
+            if not conf.CheckLinkFlag('-gz'):
+                warning("Can't enable executable debug section compression")
+
+    if env['USE_PYTHON']:
+        config_embedded_python(env)
+        gem5py_env = env.Clone()
+    else:
+        gem5py_env = env.Clone()
+        config_embedded_python(gem5py_env)
+
+    # Bare minimum environment that only includes python
+    gem5py_env.Append(CCFLAGS=['${GEM5PY_CCFLAGS_EXTRA}'])
+    gem5py_env.Append(LINKFLAGS=['${GEM5PY_LINKFLAGS_EXTRA}'])
+
+    if GetOption('gprof') and GetOption('pprof'):
+        error('Only one type of profiling should be enabled at a time')
+    if GetOption('gprof'):
+        env.Append(CCFLAGS=['-g', '-pg'], LINKFLAGS=['-pg'])
+    if GetOption('pprof'):
+        env.Append(CCFLAGS=['-g'],
+                LINKFLAGS=['-Wl,--no-as-needed', '-lprofiler',
+                    '-Wl,--as-needed'])
+
+    env['HAVE_PKG_CONFIG'] = env.Detect('pkg-config')
+
+    with gem5_scons.Configure(env) as conf:
+        # On Solaris you need to use libsocket for socket ops
+        if not conf.CheckLibWithHeader(
+                [None, 'socket'], 'sys/socket.h', 'C++', 'accept(0,0,0);'):
+           error("Can't find library with socket calls (e.g. accept()).")
+
+        if not conf.CheckLibWithHeader('z', 'zlib.h', 'C++','zlibVersion();'):
+            error('Did not find needed zlib compression library '
+                  'and/or zlib.h header file.\n'
+                  'Please install zlib and try again.')
+
+    if not GetOption('without_tcmalloc'):
+        with gem5_scons.Configure(env) as conf:
+            if conf.CheckLib('tcmalloc_minimal'):
+                conf.env.Append(CCFLAGS=conf.env['TCMALLOC_CCFLAGS'])
+            elif conf.CheckLib('tcmalloc'):
+                conf.env.Append(CCFLAGS=conf.env['TCMALLOC_CCFLAGS'])
+            else:
+                warning("You can get a 12% performance improvement by "
+                        "installing tcmalloc (libgoogle-perftools-dev package "
+                        "on Ubuntu or RedHat).")
+
+    if not GetOption('silent'):
+        print("Building in", variant_path)
+
     # variant_dir is the tail component of build path, and is used to
-    # determine the build parameters (e.g., 'ALPHA_SE')
-    (build_root, variant_dir) = splitpath(variant_path)
+    # determine the build parameters (e.g., 'X86')
+    (build_root, variant_dir) = os.path.split(variant_path)
+
+    ####################################################################
+    #
+    # Read and process SConsopts files. These can add new settings which
+    # affect each variant directory independently.
+    #
+    ####################################################################
+
+    # Register a callback to call after all SConsopts files have been read.
+    after_sconsopts_callbacks = []
+    def AfterSConsopts(cb):
+        after_sconsopts_callbacks.append(cb)
+    Export('AfterSConsopts')
+
+    # Sticky variables get saved in the variables file so they persist from
+    # one invocation to the next (unless overridden, in which case the new
+    # value becomes sticky).
+    sticky_vars = Variables(args=ARGUMENTS)
+    Export('sticky_vars')
+
+    # EXTRAS is special since it affects what SConsopts need to be read.
+    sticky_vars.Add(('EXTRAS', 'Add extra directories to the compilation', ''))
 
     # Set env variables according to the build directory config.
     sticky_vars.files = []
     # Variables for $BUILD_ROOT/$VARIANT_DIR are stored in
-    # $BUILD_ROOT/variables/$VARIANT_DIR so you can nuke
-    # $BUILD_ROOT/$VARIANT_DIR without losing your variables settings.
-    current_vars_file = joinpath(build_root, 'variables', variant_dir)
-    if isfile(current_vars_file):
-        sticky_vars.files.append(current_vars_file)
-        print "Using saved variables file %s" % current_vars_file
-    else:
-        # Build dir-specific variables file doesn't exist.
+    # $BUILD_ROOT/$VARIANT_DIR/gem5.build/variables
 
-        # Make sure the directory is there so we can create it later
-        opt_dir = dirname(current_vars_file)
-        if not isdir(opt_dir):
-            mkdir(opt_dir)
+    gem5_build_vars = os.path.join(gem5_build, 'variables')
+    build_root_vars = os.path.join(build_root, 'variables', variant_dir)
+    current_vars_files = [gem5_build_vars, build_root_vars]
+    existing_vars_files = list(filter(isfile, current_vars_files))
+    if existing_vars_files:
+        sticky_vars.files.extend(existing_vars_files)
+        if not GetOption('silent'):
+            print('Using saved variables file(s) %s' %
+                    ', '.join(existing_vars_files))
+    else:
+        # Variant specific variables file doesn't exist.
 
         # Get default build variables from source tree.  Variables are
         # normally determined by name of $VARIANT_DIR, but can be
         # overridden by '--default=' arg on command line.
         default = GetOption('default')
-        opts_dir = joinpath(main.root.abspath, 'build_opts')
+        opts_dir = Dir('#build_opts').abspath
         if default:
-            default_vars_files = [joinpath(build_root, 'variables', default),
-                                  joinpath(opts_dir, default)]
+            default_vars_files = [
+                    gem5_build_vars,
+                    build_root_vars,
+                    os.path.join(opts_dir, default)
+                ]
         else:
-            default_vars_files = [joinpath(opts_dir, variant_dir)]
-        existing_files = filter(isfile, default_vars_files)
-        if existing_files:
-            default_vars_file = existing_files[0]
+            default_vars_files = [os.path.join(opts_dir, variant_dir)]
+        existing_default_files = list(filter(isfile, default_vars_files))
+        if existing_default_files:
+            default_vars_file = existing_default_files[0]
             sticky_vars.files.append(default_vars_file)
-            print "Variables file %s not found,\n  using defaults in %s" \
-                  % (current_vars_file, default_vars_file)
+            print("Variables file(s) %s not found,\n  using defaults in %s" %
+                    (' or '.join(current_vars_files), default_vars_file))
         else:
-            print "Error: cannot find variables file %s or " \
-                  "default file(s) %s" \
-                  % (current_vars_file, ' or '.join(default_vars_files))
+            error("Cannot find variables file(s) %s or default file(s) %s" %
+                    (' or '.join(current_vars_files),
+                     ' or '.join(default_vars_files)))
             Exit(1)
 
-    # Apply current variable settings to env
+    # Apply current settings for EXTRAS to env.
     sticky_vars.Update(env)
 
-    help_texts["local_vars"] += \
-        "Build variables for %s:\n" % variant_dir \
-                 + sticky_vars.GenerateHelpText(env)
+    # Parse EXTRAS variable to build list of all directories where we're
+    # look for sources etc.  This list is exported as extras_dir_list.
+    if env['EXTRAS']:
+        extras_dir_list = makePathListAbsolute(env['EXTRAS'].split(':'))
+    else:
+        extras_dir_list = []
 
-    # Process variable settings.
+    Export('extras_dir_list')
 
-    if not have_fenv and env['USE_FENV']:
-        print "Warning: <fenv.h> not available; " \
-              "forcing USE_FENV to False in", variant_dir + "."
-        env['USE_FENV'] = False
+    # Variables which were determined with Configure.
+    env['CONF'] = {}
 
-    if not env['USE_FENV']:
-        print "Warning: No IEEE FP rounding mode control in", variant_dir + "."
-        print "         FP results may deviate slightly from other platforms."
+    # Walk the tree and execute all SConsopts scripts that wil add to the
+    # above variables
+    if GetOption('verbose'):
+        print("Reading SConsopts")
 
-    if env['EFENCE']:
-        env.Append(LIBS=['efence'])
+    def trySConsopts(dir):
+        sconsopts_path = os.path.join(dir, 'SConsopts')
+        if not isfile(sconsopts_path):
+            return
+        if GetOption('verbose'):
+            print("Reading", sconsopts_path)
+        SConscript(sconsopts_path, exports={'main': env})
 
-    # Save sticky variable settings back to current variables file
-    sticky_vars.Save(current_vars_file, env)
+    trySConsopts(Dir('#').abspath)
+    for bdir in [ base_dir ] + extras_dir_list:
+        if not isdir(bdir):
+            error("Directory '%s' does not exist." % bdir)
+        for root, dirs, files in os.walk(bdir):
+            trySConsopts(root)
 
-    if env['USE_SSE2']:
-        env.Append(CCFLAGS=['-msse2'])
+    # Call any callbacks which the SConsopts files registered.
+    for cb in after_sconsopts_callbacks:
+        cb()
 
-    if have_tcmalloc:
-        env.Append(LIBS=['tcmalloc_minimal'])
+    # Update env for new variables added by the SConsopts.
+    sticky_vars.Update(env)
+
+    Help('''
+Build variables for {dir}:
+{help}
+'''.format(dir=variant_dir, help=sticky_vars.GenerateHelpText(env)),
+         append=True)
+
+    # If the old vars file exists, delete it to avoid confusion/stale values.
+    if isfile(build_root_vars):
+        warning(f'Deleting old variant variables file "{build_root_vars}"')
+        remove(build_root_vars)
+    # Save sticky variables back to the gem5.build variant variables file.
+    sticky_vars.Save(gem5_build_vars, env)
+
+    # Pull all the sticky variables into the CONF dict.
+    env['CONF'].update({key: env[key] for key in sticky_vars.keys()})
+
+    # Do this after we save setting back, or else we'll tack on an
+    # extra 'qdo' every time we run scons.
+    if env['CONF']['BATCH']:
+        env['CC']     = env['CONF']['BATCH_CMD'] + ' ' + env['CC']
+        env['CXX']    = env['CONF']['BATCH_CMD'] + ' ' + env['CXX']
+        env['AS']     = env['CONF']['BATCH_CMD'] + ' ' + env['AS']
+        env['AR']     = env['CONF']['BATCH_CMD'] + ' ' + env['AR']
+        env['RANLIB'] = env['CONF']['BATCH_CMD'] + ' ' + env['RANLIB']
+
+    # Cache build files in the supplied directory.
+    if env['CONF']['M5_BUILD_CACHE']:
+        print('Using build cache located at', env['CONF']['M5_BUILD_CACHE'])
+        CacheDir(env['CONF']['M5_BUILD_CACHE'])
+
+
+    env.Append(CCFLAGS='$CCFLAGS_EXTRA')
+    env.Append(LINKFLAGS='$LINKFLAGS_EXTRA')
+
+    exports=['env', 'gem5py_env']
+
+    ext_dir = Dir('#ext').abspath
+    variant_ext = os.path.join(variant_path, 'ext')
+    for root, dirs, files in os.walk(ext_dir):
+        if 'SConscript' in files:
+            build_dir = os.path.relpath(root, ext_dir)
+            SConscript(os.path.join(root, 'SConscript'),
+                       variant_dir=os.path.join(variant_ext, build_dir),
+                       exports=exports,
+                       duplicate=GetOption('duplicate_sources'))
 
     # The src/SConscript file sets up the build rules in 'env' according
     # to the configured variables.  It returns a list of environments,
     # one for each variant build (debug, opt, etc.)
-    envList = SConscript('src/SConscript', variant_dir = variant_path,
-                         exports = 'env')
+    SConscript('src/SConscript', variant_dir=variant_path, exports=exports,
+               duplicate=GetOption('duplicate_sources'))
 
-    # Set up the regression tests for each build.
-    for e in envList:
-        SConscript('tests/SConscript',
-                   variant_dir = joinpath(variant_path, 'tests', e.Label),
-                   exports = { 'env' : e }, duplicate = False)
-
-# base help text
-Help('''
-Usage: scons [scons options] [build variables] [target(s)]
-
-Extra scons options:
-%(options)s
-
-Global build variables:
-%(global_vars)s
-
-%(local_vars)s
-''' % help_texts)
+atexit.register(summarize_warnings)

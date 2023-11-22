@@ -27,20 +27,25 @@
  */
 
 #include "mem/ruby/profiler/StoreTrace.hh"
-#include "sim/core.hh"
 
-using namespace std;
+#include "sim/cur_tick.hh"
+
+namespace gem5
+{
+
+namespace ruby
+{
 
 bool StoreTrace::s_init = false; // Total number of store lifetimes of
                                  // all lines
-int64 StoreTrace::s_total_samples = 0; // Total number of store
+int64_t StoreTrace::s_total_samples = 0; // Total number of store
                                        // lifetimes of all lines
 Histogram* StoreTrace::s_store_count_ptr = NULL;
 Histogram* StoreTrace::s_store_first_to_stolen_ptr = NULL;
 Histogram* StoreTrace::s_store_last_to_stolen_ptr = NULL;
 Histogram* StoreTrace::s_store_first_to_last_ptr = NULL;
 
-StoreTrace::StoreTrace(const Address& addr)
+StoreTrace::StoreTrace(Addr addr)
     : m_store_count(-1), m_store_first_to_stolen(-1),
       m_store_last_to_stolen(-1), m_store_first_to_last(-1)
 {
@@ -58,14 +63,14 @@ StoreTrace::~StoreTrace()
 }
 
 void
-StoreTrace::print(ostream& out) const
+StoreTrace::print(std::ostream& out) const
 {
     out << m_addr
-        << " total_samples: " << m_total_samples << endl
-        << "store_count: " << m_store_count << endl
-        << "store_first_to_stolen: " << m_store_first_to_stolen << endl
-        << "store_last_to_stolen: " << m_store_last_to_stolen << endl
-        << "store_first_to_last: " << m_store_first_to_last  << endl;
+        << " total_samples: " << m_total_samples << std::endl
+        << "store_count: " << m_store_count << std::endl
+        << "store_first_to_stolen: " << m_store_first_to_stolen << std::endl
+        << "store_last_to_stolen: " << m_store_last_to_stolen << std::endl
+        << "store_first_to_last: " << m_store_first_to_last  << std::endl;
 }
 
 void
@@ -82,13 +87,16 @@ StoreTrace::initSummary()
 }
 
 void
-StoreTrace::printSummary(ostream& out)
+StoreTrace::printSummary(std::ostream& out)
 {
-    out << "total_samples: " << s_total_samples << endl;
-    out << "store_count: " << (*s_store_count_ptr) << endl;
-    out << "store_first_to_stolen: " << (*s_store_first_to_stolen_ptr) << endl;
-    out << "store_last_to_stolen: " << (*s_store_last_to_stolen_ptr) << endl;
-    out << "store_first_to_last: " << (*s_store_first_to_last_ptr) << endl;
+    out << "total_samples: " << s_total_samples << std::endl;
+    out << "store_count: " << (*s_store_count_ptr) << std::endl;
+    out << "store_first_to_stolen: "
+        << (*s_store_first_to_stolen_ptr) << std::endl;
+    out << "store_last_to_stolen: "
+        << (*s_store_last_to_stolen_ptr) << std::endl;
+    out << "store_first_to_last: " << (*s_store_first_to_last_ptr)
+        << std::endl;
 }
 
 void
@@ -127,7 +135,7 @@ void
 StoreTrace::downgrade(NodeID node)
 {
     if (node == m_last_writer) {
-        Time current = curTick();
+        Tick current = curTick();
         assert(m_stores_this_interval != 0);
         assert(m_last_store != 0);
         assert(m_first_store != 0);
@@ -155,3 +163,6 @@ StoreTrace::downgrade(NodeID node)
         m_last_writer = -1;
     }
 }
+
+} // namespace ruby
+} // namespace gem5

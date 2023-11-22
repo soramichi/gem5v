@@ -1,4 +1,16 @@
 /*
+ * Copyright (c) 2017,2021 ARM Limited
+ * All rights reserved.
+ *
+ * The license below extends only to copyright in the software and shall
+ * not be construed as granting a license to any other intellectual
+ * property including but not limited to intellectual property relating
+ * to a hardware implementation of the functionality of the software
+ * licensed hereunder.  You may use the software subject to the license
+ * terms below provided that you ensure that this notice is replicated
+ * unmodified and in its entirety in all distributions of the software,
+ * modified or unmodified, in source code or in binary form.
+ *
  * Copyright (c) 1999-2008 Mark D. Hill and David A. Wood
  * All rights reserved.
  *
@@ -42,57 +54,63 @@
 
 #include <iostream>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
+#include "base/addr_range.hh"
+#include "base/types.hh"
 #include "mem/packet.hh"
-#include "mem/protocol/LinkDirection.hh"
-#include "mem/protocol/MessageSizeType.hh"
+#include "mem/port.hh"
+#include "mem/ruby/common/MachineID.hh"
 #include "mem/ruby/common/TypeDefines.hh"
+#include "mem/ruby/network/Topology.hh"
+#include "mem/ruby/network/dummy_port.hh"
+#include "mem/ruby/protocol/LinkDirection.hh"
+#include "mem/ruby/protocol/MessageSizeType.hh"
 #include "params/RubyNetwork.hh"
-#include "sim/sim_object.hh"
+#include "sim/clocked_object.hh"
+
+namespace gem5
+{
+
+namespace ruby
+{
 
 class NetDest;
 class MessageBuffer;
-class Throttle;
-class Topology;
 
-class Network : public SimObject
+class Network : public ClockedObject
 {
   public:
-    typedef RubyNetworkParams Params;
-    Network(const Params *p);
-    virtual ~Network() {}
+    PARAMS(RubyNetwork);
+    Network(const Params &p);
 
-    virtual void init();
+    virtual ~Network();
 
-    static int getNumberOfVirtualNetworks() { return m_virtual_networks; }
+    static uint32_t getNumberOfVirtualNetworks() { return m_virtual_networks; }
+    int getNumNodes() const { return m_nodes; }
+
     static uint32_t MessageSizeType_to_int(MessageSizeType size_type);
 
     // returns the queue requested for the given component
-    virtual MessageBuffer* getToNetQueue(NodeID id, bool ordered,
-        int netNumber, std::string vnet_type) = 0;
-    virtual MessageBuffer* getFromNetQueue(NodeID id, bool ordered,
-        int netNumber, std::string vnet_type) = 0;
-    virtual const std::vector<Throttle*>* getThrottles(NodeID id) const;
-    virtual int getNumNodes() {return 1;}
+    void setToNetQueue(NodeID global_id, bool ordered, int netNumber,
+                               std::string vnet_type, MessageBuffer *b);
+    virtual void setFromNetQueue(NodeID global_id, bool ordered, int netNumber,
+                                 std::string vnet_type, MessageBuffer *b);
 
-    virtual void makeOutLink(SwitchID src, NodeID dest, BasicLink* link,
-                             LinkDirection direction,
-                             const NetDest& routing_table_entry,
-                             bool isReconfiguration) = 0;
-    virtual void makeInLink(NodeID src, SwitchID dest, BasicLink* link,
-                            LinkDirection direction,
-                            const NetDest& routing_table_entry,
-                            bool isReconfiguration) = 0;
+    virtual void checkNetworkAllocation(NodeID local_id, bool ordered,
+                                       int network_num, std::string vnet_type);
+
+    virtual void makeExtOutLink(SwitchID src, NodeID dest, BasicLink* link,
+                             std::vector<NetDest>& routing_table_entry) = 0;
+    virtual void makeExtInLink(NodeID src, SwitchID dest, BasicLink* link,
+                            std::vector<NetDest>& routing_table_entry) = 0;
     virtual void makeInternalLink(SwitchID src, SwitchID dest, BasicLink* link,
-                                  LinkDirection direction,
-                                  const NetDest& routing_table_entry,
-                                  bool isReconfiguration) = 0;
+                                  std::vector<NetDest>& routing_table_entry,
+                                  PortDirection src_outport,
+                                  PortDirection dst_inport) = 0;
 
-    virtual void reset() = 0;
-
-    virtual void printStats(std::ostream& out) const = 0;
-    virtual void clearStats() = 0;
+    virtual void collateStats() = 0;
     virtual void print(std::ostream& out) const = 0;
 
     /*
@@ -102,21 +120,62 @@ class Network : public SimObject
      */
     virtual bool functionalRead(Packet *pkt)
     { fatal("Functional read not implemented.\n"); }
+    virtual bool functionalRead(Packet *pkt, WriteMask& mask)
+    { fatal("Masked functional read not implemented.\n"); }
     virtual uint32_t functionalWrite(Packet *pkt)
     { fatal("Functional write not implemented.\n"); }
+
+    /**
+     * Map an address to the correct NodeID
+     *
+     * This function traverses the global address map to find the
+     * NodeID that corresponds to the given address and the type of
+     * the destination. For example for a request to a directory this
+     * function will return the NodeID of the right directory.
+     *
+     * @param the destination address
+     * @param the type of the destination
+     * @return the NodeID of the destination
+     */
+    NodeID addressToNodeID(Addr addr, MachineType mtype);
+
+    Port &
+    getPort(const std::string &, PortID idx=InvalidPortID) override
+    {
+        return RubyDummyPort::instance();
+    }
+
+    NodeID getLocalNodeID(NodeID global_id) const;
 
   protected:
     // Private copy constructor and assignment operator
     Network(const Network& obj);
     Network& operator=(const Network& obj);
 
-  protected:
-    const std::string m_name;
-    int m_nodes;
+    uint32_t m_nodes;
     static uint32_t m_virtual_networks;
+    std::vector<std::string> m_vnet_type_names;
     Topology* m_topology_ptr;
     static uint32_t m_control_msg_size;
     static uint32_t m_data_msg_size;
+
+    // vector of queues from the components
+    std::vector<std::vector<MessageBuffer*> > m_toNetQueues;
+    std::vector<std::vector<MessageBuffer*> > m_fromNetQueues;
+    std::vector<bool> m_ordered;
+
+  private:
+    // Global address map
+    struct AddrMapNode
+    {
+        NodeID id;
+        AddrRangeList ranges;
+    };
+    std::unordered_multimap<MachineType, AddrMapNode> addrMap;
+
+    // Global NodeID to local node map. If there are not multiple networks in
+    // the same RubySystem, this is a one-to-one mapping of global to local.
+    std::unordered_map<NodeID, NodeID> globalToLocalMap;
 };
 
 inline std::ostream&
@@ -126,5 +185,8 @@ operator<<(std::ostream& out, const Network& obj)
     out << std::flush;
     return out;
 }
+
+} // namespace ruby
+} // namespace gem5
 
 #endif // __MEM_RUBY_NETWORK_NETWORK_HH__

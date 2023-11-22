@@ -33,30 +33,38 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * Authors: Ali Saidi
  */
 
 #ifndef __DEV_ARM_SP804_HH__
 #define __DEV_ARM_SP804_HH__
 
+#include <cstdint>
+
+#include "base/bitunion.hh"
+#include "base/types.hh"
 #include "dev/arm/amba_device.hh"
 #include "params/Sp804.hh"
+#include "sim/eventq.hh"
+#include "sim/serialize.hh"
 
 /** @file
  * This implements the dual Sp804 timer block
  */
 
-class Gic;
+namespace gem5
+{
 
-class Sp804 : public AmbaDevice
+class BaseGic;
+
+class Sp804 : public AmbaPioDevice
 {
   protected:
-    class Timer
+    class Timer : public Serializable
     {
 
       public:
-        enum {
+        enum
+        {
             LoadReg    = 0x00,
             CurrentReg = 0x04,
             ControlReg = 0x08,
@@ -82,11 +90,11 @@ class Sp804 : public AmbaDevice
         /** Pointer to parent class */
         Sp804 *parent;
 
-        /** Number of interrupt to cause/clear */
-        uint32_t intNum;
+        /** Pointer to the interrupt pin */
+        ArmInterruptPin * const interrupt;
 
         /** Number of ticks in a clock input */
-        Tick clock;
+        const Tick clock;
 
         /** Control register as specified above */
         CTRL control;
@@ -104,14 +112,15 @@ class Sp804 : public AmbaDevice
 
         /** Called when the counter reaches 0 */
         void counterAtZero();
-        EventWrapper<Timer, &Timer::counterAtZero> zeroEvent;
+        EventFunctionWrapper zeroEvent;
 
       public:
         /** Restart the counter ticking at val
          * @param val the value to start at (pre-16 bit masking if en) */
         void restartCounter(uint32_t val);
 
-        Timer(std::string __name, Sp804 *parent, int int_num, Tick clock);
+        Timer(std::string __name, Sp804 *parent, ArmInterruptPin *_interrupt,
+              Tick clock);
 
         std::string name() const { return _name; }
 
@@ -121,50 +130,42 @@ class Sp804 : public AmbaDevice
         /** Handle write for a single timer */
         void write(PacketPtr pkt, Addr daddr);
 
-        void serialize(std::ostream &os);
-        void unserialize(Checkpoint *cp, const std::string &section);
-
+        void serialize(CheckpointOut &cp) const override;
+        void unserialize(CheckpointIn &cp) override;
     };
-
-    /** Pointer to the GIC for causing an interrupt */
-    Gic *gic;
 
     /** Timers that do the actual work */
     Timer timer0;
     Timer timer1;
 
   public:
-    typedef Sp804Params Params;
-    const Params *
-    params() const
-    {
-        return dynamic_cast<const Params *>(_params);
-    }
+    using Params = Sp804Params;
+
     /**
       * The constructor for RealView just registers itself with the MMU.
       * @param p params structure
       */
-    Sp804(Params *p);
+    Sp804(const Params &p);
 
     /**
      * Handle a read to the device
      * @param pkt The memory request.
      * @param data Where to put the data.
      */
-    virtual Tick read(PacketPtr pkt);
+    Tick read(PacketPtr pkt) override;
 
     /**
      * All writes are simply ignored.
      * @param pkt The memory request.
      * @param data the data
      */
-    virtual Tick write(PacketPtr pkt);
+    Tick write(PacketPtr pkt) override;
 
 
-    virtual void serialize(std::ostream &os);
-    virtual void unserialize(Checkpoint *cp, const std::string &section);
+    void serialize(CheckpointOut &cp) const override;
+    void unserialize(CheckpointIn &cp) override;
 };
 
+} // namespace gem5
 
 #endif // __DEV_ARM_SP804_HH__
-

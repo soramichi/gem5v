@@ -1,6 +1,7 @@
 /*
  * Copyright (c) 2000-2005 The Regents of The University of Michigan
  * Copyright (c) 2008 The Hewlett-Packard Development Company
+ * Copyright (c) 2013 Advanced Micro Devices, Inc.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -25,34 +26,49 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * Authors: Steve Reinhardt
- *          Nathan Binkert
- *          Steve Raasch
  */
+
+#include "sim/eventq.hh"
 
 #include <cassert>
 #include <iostream>
+#include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
-#include "base/hashmap.hh"
-#include "base/misc.hh"
+#include "base/logging.hh"
 #include "base/trace.hh"
 #include "cpu/smt.hh"
-#include "debug/Config.hh"
-#include "sim/core.hh"
-#include "sim/eventq.hh"
+#include "debug/Checkpoint.hh"
 
-using namespace std;
+namespace gem5
+{
+
+Tick simQuantum = 0;
 
 //
-// Main Event Queue
+// Main Event Queues
 //
-// Events on this queue are processed at the *beginning* of each
+// Events on these queues are processed at the *beginning* of each
 // cycle, before the pipeline simulation is performed.
 //
-EventQueue mainEventQueue("Main Event Queue");
+uint32_t numMainEventQueues = 0;
+std::vector<EventQueue *> mainEventQueue;
+__thread EventQueue *_curEventQueue = NULL;
+bool inParallelMode = false;
+
+EventQueue *
+getEventQueue(uint32_t index)
+{
+    while (numMainEventQueues <= index) {
+        numMainEventQueues++;
+        mainEventQueue.push_back(
+            new EventQueue(csprintf("MainEventQueue-%d", index)));
+    }
+
+    return mainEventQueue[index];
+}
 
 #ifndef NDEBUG
 Counter Event::instanceCounter = 0;
@@ -67,11 +83,7 @@ Event::~Event()
 const std::string
 Event::name() const
 {
-#ifndef NDEBUG
-    return csprintf("Event_%d", instance);
-#else
-    return csprintf("Event_%x", (uintptr_t)this);
-#endif
+    return csprintf("Event_%s", instanceString());
 }
 
 
@@ -94,6 +106,32 @@ Event::insertBefore(Event *event, Event *curr)
     }
 
     return event;
+}
+
+void
+Event::acquire()
+{
+    if (flags.isSet(Event::Managed))
+        acquireImpl();
+}
+
+void
+Event::release()
+{
+    if (flags.isSet(Event::Managed))
+        releaseImpl();
+}
+
+void
+Event::acquireImpl()
+{
+}
+
+void
+Event::releaseImpl()
+{
+    if (!scheduled())
+        delete this;
 }
 
 void
@@ -156,6 +194,8 @@ EventQueue::remove(Event *event)
     if (head == NULL)
         panic("event not found!");
 
+    assert(event->queue == this);
+
     // deal with an event on the head's 'in bin' list (event has the same
     // time as the head)
     if (*head == *event) {
@@ -183,6 +223,7 @@ EventQueue::remove(Event *event)
 Event *
 EventQueue::serviceOne()
 {
+    std::lock_guard<EventQueue> lock(*this);
     Event *event = head;
     Event *next = head->nextInBin;
     event->flags.clear(Event::Scheduled);
@@ -201,23 +242,27 @@ EventQueue::serviceOne()
 
     // handle action
     if (!event->squashed()) {
+        // forward current cycle to the time when this event occurs.
+        setCurTick(event->when());
+        if (debug::Event)
+            event->trace("executed");
         event->process();
         if (event->isExitEvent()) {
-            assert(!event->flags.isSet(Event::AutoDelete)); // would be silly
+            assert(!event->flags.isSet(Event::Managed) ||
+                   !event->flags.isSet(Event::IsMainQueue)); // would be silly
             return event;
         }
     } else {
         event->flags.clear(Event::Squashed);
     }
 
-    if (event->flags.isSet(Event::AutoDelete) && !event->scheduled())
-        delete event;
+    event->release();
 
     return NULL;
 }
 
 void
-Event::serialize(std::ostream &os)
+Event::serialize(CheckpointOut &cp) const
 {
     SERIALIZE_SCALAR(_when);
     SERIALIZE_SCALAR(_priority);
@@ -226,22 +271,21 @@ Event::serialize(std::ostream &os)
 }
 
 void
-Event::unserialize(Checkpoint *cp, const string &section)
+Event::unserialize(CheckpointIn &cp)
 {
-    if (scheduled())
-        mainEventQueue.deschedule(this);
+    assert(!scheduled());
 
     UNSERIALIZE_SCALAR(_when);
     UNSERIALIZE_SCALAR(_priority);
 
-    short _flags;
+    FlagsType _flags;
     UNSERIALIZE_SCALAR(_flags);
 
     // Old checkpoints had no concept of the Initialized flag
     // so restoring from old checkpoints always fail.
-    // Events are initialized on construction but original code 
-    // "flags = _flags" would just overwrite the initialization. 
-    // So, read in the checkpoint flags, but then set the Initialized 
+    // Events are initialized on construction but original code
+    // "flags = _flags" would just overwrite the initialization.
+    // So, read in the checkpoint flags, but then set the Initialized
     // flag on top of it in order to avoid failures.
     assert(initialized());
     flags = _flags;
@@ -250,62 +294,23 @@ Event::unserialize(Checkpoint *cp, const string &section)
     // need to see if original event was in a scheduled, unsquashed
     // state, but don't want to restore those flags in the current
     // object itself (since they aren't immediately true)
-    bool wasScheduled = flags.isSet(Scheduled) && !flags.isSet(Squashed);
-    flags.clear(Squashed | Scheduled);
-
-    if (wasScheduled) {
-        DPRINTF(Config, "rescheduling at %d\n", _when);
-        mainEventQueue.schedule(this, _when);
+    if (flags.isSet(Scheduled) && !flags.isSet(Squashed)) {
+        flags.clear(Squashed | Scheduled);
+    } else {
+        DPRINTF(Checkpoint, "Event '%s' need to be scheduled @%d\n",
+                name(), _when);
     }
 }
 
 void
-EventQueue::serialize(ostream &os)
+EventQueue::checkpointReschedule(Event *event)
 {
-    std::list<Event *> eventPtrs;
-
-    int numEvents = 0;
-    Event *nextBin = head;
-    while (nextBin) {
-        Event *nextInBin = nextBin;
-
-        while (nextInBin) {
-            if (nextInBin->flags.isSet(Event::AutoSerialize)) {
-                eventPtrs.push_back(nextInBin);
-                paramOut(os, csprintf("event%d", numEvents++),
-                         nextInBin->name());
-            }
-            nextInBin = nextInBin->nextInBin;
-        }
-
-        nextBin = nextBin->nextBin;
-    }
-
-    SERIALIZE_SCALAR(numEvents);
-
-    for (std::list<Event *>::iterator it = eventPtrs.begin();
-         it != eventPtrs.end(); ++it) {
-        (*it)->nameOut(os);
-        (*it)->serialize(os);
-    }
+    // It's safe to call insert() directly here since this method
+    // should only be called when restoring from a checkpoint (which
+    // happens before thread creation).
+    if (event->flags.isSet(Event::Scheduled))
+        insert(event);
 }
-
-void
-EventQueue::unserialize(Checkpoint *cp, const std::string &section)
-{
-    int numEvents;
-    UNSERIALIZE_SCALAR(numEvents);
-
-    std::string eventName;
-    for (int i = 0; i < numEvents; i++) {
-        // get the pointer value associated with the event
-        paramIn(cp, section, csprintf("event%d", i), eventName);
-
-        // create the event based on its pointer value
-        Serializable::create(cp, eventName);
-    }
-}
-
 void
 EventQueue::dump() const
 {
@@ -334,7 +339,7 @@ EventQueue::dump() const
 bool
 EventQueue::debugVerify() const
 {
-    m5::hash_map<long, bool> map;
+    std::unordered_map<long, bool> map;
 
     Tick time = 0;
     short priority = 0;
@@ -384,7 +389,9 @@ EventQueue::replaceHead(Event* s)
 void
 dumpMainQueue()
 {
-    mainEventQueue.dump();
+    for (uint32_t i = 0; i < numMainEventQueues; ++i) {
+        mainEventQueue[i]->dump();
+    }
 }
 
 
@@ -397,16 +404,23 @@ Event::description() const
 void
 Event::trace(const char *action)
 {
-    // This DPRINTF is unconditional because calls to this function
-    // are protected by an 'if (DTRACE(Event))' in the inlined Event
-    // methods.
-    //
     // This is just a default implementation for derived classes where
     // it's not worth doing anything special.  If you want to put a
     // more informative message in the trace, override this method on
     // the particular subclass where you have the information that
     // needs to be printed.
-    DPRINTFN("%s event %s @ %d\n", description(), action, when());
+    DPRINTF(Event, "%s %s %s @ %d\n",
+            description(), instanceString(), action, when());
+}
+
+const std::string
+Event::instanceString() const
+{
+#ifndef NDEBUG
+    return csprintf("%d", instance);
+#else
+    return csprintf("%#x", (uintptr_t)this);
+#endif
 }
 
 void
@@ -427,6 +441,31 @@ Event::dump() const
     }
 }
 
-EventQueue::EventQueue(const string &n)
-    : objName(n), head(NULL)
-{}
+EventQueue::EventQueue(const std::string &n)
+    : objName(n), head(NULL), _curTick(0)
+{
+}
+
+void
+EventQueue::asyncInsert(Event *event)
+{
+    async_queue_mutex.lock();
+    async_queue.push_back(event);
+    async_queue_mutex.unlock();
+}
+
+void
+EventQueue::handleAsyncInsertions()
+{
+    assert(this == curEventQueue());
+    async_queue_mutex.lock();
+
+    while (!async_queue.empty()) {
+        insert(async_queue.front());
+        async_queue.pop_front();
+    }
+
+    async_queue_mutex.unlock();
+}
+
+} // namespace gem5

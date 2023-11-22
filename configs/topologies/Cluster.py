@@ -23,17 +23,15 @@
 # THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-#
-# Authors: Jason Power
 
+from topologies.BaseTopology import BaseTopology
 
-from BaseTopology import BaseTopology
 
 class Cluster(BaseTopology):
-    """ A cluster is a group of nodes which are all one hop from eachother
-        Clusters can also contain other clusters
-        When creating this kind of topology, return a single cluster (usually
-        the root cluster) from create_system in configs/ruby/<protocol>.py
+    """A cluster is a group of nodes which are all one hop from eachother
+    Clusters can also contain other clusters
+    When creating this kind of topology, return a single cluster (usually
+    the root cluster) from create_system in configs/ruby/<protocol>.py
     """
 
     _num_int_links = 0
@@ -45,26 +43,28 @@ class Cluster(BaseTopology):
     def num_int_links(cls):
         cls._num_int_links += 1
         return cls._num_int_links - 1
+
     @classmethod
     def num_ext_links(cls):
         cls._num_ext_links += 1
         return cls._num_ext_links - 1
+
     @classmethod
     def num_routers(cls):
         cls._num_routers += 1
         return cls._num_routers - 1
 
     def __init__(self, intBW=0, extBW=0, intLatency=0, extLatency=0):
-        """ internalBandwidth is bandwidth of all links within the cluster
-            externalBandwidth is bandwidth from this cluster to any cluster
-                connecting to it.
-            internal/externalLatency are similar
-            **** When creating a cluster with sub-clusters, the sub-cluster
-                 external bandwidth overrides the internal bandwidth of the
-                 super cluster
+        """internalBandwidth is bandwidth of all links within the cluster
+        externalBandwidth is bandwidth from this cluster to any cluster
+            connecting to it.
+        internal/externalLatency are similar
+        **** When creating a cluster with sub-clusters, the sub-cluster
+             external bandwidth overrides the internal bandwidth of the
+             super cluster
         """
         self.nodes = []
-        self.router = None # created in makeTopology
+        self.router = None  # created in makeTopology
         self.intBW = intBW
         self.extBW = extBW
         self.intLatency = intLatency
@@ -73,48 +73,65 @@ class Cluster(BaseTopology):
     def add(self, node):
         self.nodes.append(node)
 
-    def makeTopology(self, options, IntLink, ExtLink, Router):
-        """ Recursively make all of the links and routers
-        """
-        routers = []
-        int_links = []
-        ext_links = []
+    def makeTopology(self, options, network, IntLink, ExtLink, Router):
+        """Recursively make all of the links and routers"""
 
         # make a router to connect all of the nodes
         self.router = Router(router_id=self.num_routers())
-        routers.append(self.router)
+        network.routers.append(self.router)
+
         for node in self.nodes:
             if type(node) == Cluster:
-                subRouters, subIntLinks, subExtLinks = node.makeTopology(options, IntLink, ExtLink, Router)
-                routers += subRouters
-                int_links += subIntLinks
-                ext_links += subExtLinks
+                node.makeTopology(options, network, IntLink, ExtLink, Router)
 
                 # connect this cluster to the router
-                link = IntLink(link_id=self.num_int_links(), node_a=self.router, node_b=node.router)
+                link_out = IntLink(
+                    link_id=self.num_int_links(),
+                    src_node=self.router,
+                    dst_node=node.router,
+                )
+                link_in = IntLink(
+                    link_id=self.num_int_links(),
+                    src_node=node.router,
+                    dst_node=self.router,
+                )
+
                 if node.extBW:
-                    link.bandwidth_factor = node.extBW
-                elif self.intBW: # if there is an interanl b/w for this node and no ext b/w to override
-                    link.bandwidth_factor = self.intBW
+                    link_out.bandwidth_factor = node.extBW
+                    link_in.bandwidth_factor = node.extBW
+
+                # if there is an internal b/w for this node
+                # and no ext b/w to override
+                elif self.intBW:
+                    link_out.bandwidth_factor = self.intBW
+                    link_in.bandwidth_factor = self.intBW
 
                 if node.extLatency:
-                    link.latency = node.extLatency
+                    link_out.latency = node.extLatency
+                    link_in.latency = node.extLatency
                 elif self.intLatency:
-                    link.latency = self.intLatency
+                    link_out.latency = self.intLatency
+                    link_in.latency = self.intLatency
 
-                int_links.append(link)
+                network.int_links.append(link_out)
+                network.int_links.append(link_in)
             else:
-                # node is just a controller connect it to the router via a ext_link
-                link = ExtLink(link_id=self.num_ext_links(), ext_node=node, int_node=self.router)
+                # node is just a controller,
+                # connect it to the router via a ext_link
+                link = ExtLink(
+                    link_id=self.num_ext_links(),
+                    ext_node=node,
+                    int_node=self.router,
+                )
+
                 if self.intBW:
                     link.bandwidth_factor = self.intBW
                 if self.intLatency:
                     link.latency = self.intLatency
 
-                ext_links.append(link)
-
-        return routers, int_links, ext_links
+                network.ext_links.append(link)
 
     def __len__(self):
-        return len([i for i in self.nodes if type(i) != Cluster]) + \
-               sum([len(i) for i in self.nodes if type(i) == Cluster])
+        return len([i for i in self.nodes if type(i) != Cluster]) + sum(
+            [len(i) for i in self.nodes if type(i) == Cluster]
+        )

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012 ARM Limited
+ * Copyright (c) 2012-2013, 2016-2018 ARM Limited
  * All rights reserved
  *
  * The license below extends only to copyright in the software and shall
@@ -33,583 +33,109 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * Authors: Thomas Grass
- *          Andreas Hansson
- *          Sascha Bischoff
  */
-#ifndef __MEM_TRAFFIC_GEN_HH__
-#define __MEM_TRAFFIC_GEN_HH__
 
-#include <fstream>
+#ifndef __CPU_TRAFFIC_GEN_TRAFFIC_GEN_HH__
+#define __CPU_TRAFFIC_GEN_TRAFFIC_GEN_HH__
 
-#include "base/hashmap.hh"
-#include "mem/mem_object.hh"
-#include "mem/qport.hh"
-#include "params/TrafficGen.hh"
+#include <unordered_map>
+
+#include "cpu/testers/traffic_gen/base.hh"
+
+namespace gem5
+{
+
+struct TrafficGenParams;
 
 /**
- * The traffic generator is a master module that generates stimuli for
+ * The traffic generator is a module that generates stimuli for
  * the memory system, based on a collection of simple behaviours that
  * are either probabilistic or based on traces. It can be used stand
  * alone for creating test cases for interconnect and memory
- * controllers, or function as a black box replacement for system
+ * controllers, or function as a black-box replacement for system
  * components that are not yet modelled in detail, e.g. a video engine
- * or baseband subsystem.
+ * or baseband subsystem in an SoC.
+ *
+ * The traffic generator has a single request port that is used to send
+ * requests, independent of the specific behaviour. The behaviour of
+ * the traffic generator is specified in a configuration file, and this
+ * file describes a state transition graph where each state is a
+ * specific generator behaviour. Examples include idling, generating
+ * linear address sequences, random sequences and replay of captured
+ * traces. By describing these behaviours as states, it is straight
+ * forward to create very complex behaviours, simply by arranging them
+ * in graphs. The graph transitions can also be annotated with
+ * probabilities, effectively making it a Markov Chain.
  */
-class TrafficGen : public MemObject
+class TrafficGen : public BaseTrafficGen
 {
+  private: // Params
+    /**
+     * The config file to parse.
+     */
+    const std::string configFile;
 
   private:
+    /**
+     * Resolve a file path in the configuration file.
+     *
+     * This method resolves a relative path to a file that has been
+     * referenced in the configuration file. It first tries to resolve
+     * the file relative to the configuration file's path. If that
+     * fails, it falls back to constructing a path relative to the
+     * current working directory.
+     *
+     * Absolute paths are returned unmodified.
+     *
+     * @param name Path to resolve
+     */
+    std::string resolveFile(const std::string &name);
+
+     /**
+      * Parse the config file and build the state map and
+      * transition matrix.
+      */
+    void parseConfig();
 
     /**
-     * The system used to determine which mode we are currently operating
-     * in.
+     * Use the transition matrix to find the next state index.
      */
-    System* system;
+    size_t nextState();
 
-    /**
-     * MasterID used in generated requests.
-     */
-    MasterID masterID;
-
-  protected:
-
-    /**
-     * The state graph is responsible for instantiating and keeping
-     * track of the various generator states and also perform the
-     * transitions and call the appropriate functions when entering,
-     * executing and exiting a state.
-     */
-    class StateGraph
+    /** Struct to represent a probabilistic transition during parsing. */
+    struct Transition
     {
-
-      public:
-
-        /**
-         * Create a state graph from an input file.
-         *
-         * @param _owner used solely for the name
-         * @param _port port used to send requests
-         * @param file_name configuration description to read in
-         * @param master_id the unique id used for all requests
-         */
-        StateGraph(TrafficGen& _owner, QueuedMasterPort& _port,
-                   const std::string& file_name, MasterID master_id)
-            : nextTransitionTick(0), owner(_owner), port(_port)
-        {
-            parseConfig(file_name, master_id);
-        }
-
-        /**
-         * Get the name, used for DPRINTFs.
-         *
-         * @return the owner's name
-         */
-        std::string name() const { return owner.name(); }
-
-        /**
-         * Either perform a state transition or execute the current
-         * state, depending on the current time.
-         */
-        void update();
-
-        /**
-         * Determine next state and perform the transition.
-         */
-        void transition();
-
-        /**
-         * Enter a new state.
-         *
-         * @param newState identifier of state to enter
-         */
-        void enterState(uint32_t newState);
-
-        /**
-         * Get the tick of the next event, either an execution or a
-         * transition.
-         *
-         * @return tick of the next state graph event
-         */
-        Tick nextEventTick()
-        {
-            return std::min(states[currState]->nextExecuteTick(),
-                            nextTransitionTick);
-
-        }
-
-        /** Time of next transition */
-        Tick nextTransitionTick;
-
-      private:
-
-        /**
-         * Parse the config file and build the state map and
-         * transition matrix.
-         *
-         * @param file_name Config file name to parse
-         * @param master_id MasterID to use for generated requests
-         */
-        void parseConfig(const std::string& file_name, MasterID master_id);
-
-        /** Struct to represent a probabilistic transition during parsing. */
-        struct Transition {
-            uint32_t from;
-            uint32_t to;
-            double p;
-        };
-
-        /** Base class for all generator states */
-        class BaseGen
-        {
-
-          protected:
-
-            /** Port used to send requests */
-            QueuedMasterPort& port;
-
-            /** The MasterID used for generating requests */
-            const MasterID masterID;
-
-          public:
-
-            /** Time to spend in this state */
-            const Tick duration;
-
-            /**
-             * Create a base generator.
-             *
-             * @param _port port used to send requests
-             * @param master_id MasterID set on each request
-             * @param _duration duration of this state before transitioning
-             */
-            BaseGen(QueuedMasterPort& _port, MasterID master_id,
-                    Tick _duration);
-
-            virtual ~BaseGen() { }
-
-            /**
-             * Get the name, useful for DPRINTFs.
-             *
-             * @return the port name
-             */
-            std::string name() const { return port.name(); }
-
-            /**
-             * Enter this generator state.
-             */
-            virtual void enter() = 0;
-
-            /**
-             * Execute this generator state.
-             */
-            virtual void execute() = 0;
-
-            /**
-             * Exit this generator state. By default do nothing.
-             */
-            virtual void exit() { };
-
-            /**
-             * Determine the next execute tick. MaxTick means that
-             * there will not be any further event in the current
-             * activation cycle of the state.
-             *
-             * @return next tick when the state should be executed
-             */
-            virtual Tick nextExecuteTick() = 0;
-
-        };
-
-        /**
-         * The idle generator does nothing.
-         */
-        class IdleGen : public BaseGen
-        {
-
-          public:
-
-            IdleGen(QueuedMasterPort& _port, MasterID master_id,
-                    Tick _duration)
-                : BaseGen(_port, master_id, _duration)
-            { }
-
-            void enter() { }
-
-            void execute() { }
-
-            Tick nextExecuteTick() { return MaxTick; }
-        };
-
-        /**
-         * The linear generator generates sequential requests from a
-         * start to an end address, with a fixed block size. A
-         * fraction of the requests are reads, as determined by the
-         * read percent. There is an optional data limit for when to
-         * stop generating new requests.
-         */
-        class LinearGen : public BaseGen
-        {
-
-          public:
-
-            /**
-             * Create a linear address sequence generator. Set
-             * min_period == max_period for a fixed inter-transaction
-             * time.
-             *
-             * @param _port port used to send requests
-             * @param master_id MasterID set on each request
-             * @param _duration duration of this state before transitioning
-             * @param start_addr Start address
-             * @param end_addr End address
-             * @param _blocksize Size used for transactions injected
-             * @param min_period Lower limit of random inter-transaction time
-             * @param max_period Upper limit of random inter-transaction time
-             * @param read_percent Percent of transactions that are reads
-             * @param data_limit Upper limit on how much data to read/write
-             */
-            LinearGen(QueuedMasterPort& _port, MasterID master_id,
-                      Tick _duration, Addr start_addr, Addr end_addr,
-                      Addr _blocksize, Tick min_period, Tick max_period,
-                      uint8_t read_percent, Addr data_limit)
-                : BaseGen(_port, master_id, _duration),
-                  startAddr(start_addr), endAddr(end_addr),
-                  blocksize(_blocksize), minPeriod(min_period),
-                  maxPeriod(max_period), readPercent(read_percent),
-                  dataLimit(data_limit)
-            { }
-
-            void enter();
-
-            void execute();
-
-            Tick nextExecuteTick();
-
-          private:
-
-            /** Start of address range */
-            const Addr startAddr;
-
-            /** End of address range */
-            const Addr endAddr;
-
-            /** Blocksize and address increment */
-            const Addr blocksize;
-
-            /** Request generation period */
-            const Tick minPeriod;
-            const Tick maxPeriod;
-
-            /**
-             * Percent of generated transactions that should be reads
-             */
-            const uint8_t readPercent;
-
-            /** Maximum amount of data to manipulate */
-            const Addr dataLimit;
-
-            /** Address of next request */
-            Addr nextAddr;
-
-            /**
-             * Counter to determine the amount of data
-             * manipulated. Used to determine if we should continue
-             * generating requests.
-             */
-            Addr dataManipulated;
-        };
-
-        /**
-         * The random generator is similar to the linear one, but does
-         * not generate sequential addresses. Instead it randomly
-         * picks an address in the range, aligned to the block size.
-         */
-        class RandomGen : public BaseGen
-        {
-
-          public:
-
-            /**
-             * Create a random address sequence generator. Set
-             * min_period == max_period for a fixed inter-transaction
-             * time.
-             *
-             * @param _port port used to send requests
-             * @param master_id MasterID set on each request
-             * @param _duration duration of this state before transitioning
-             * @param start_addr Start address
-             * @param end_addr End address
-             * @param _blocksize Size used for transactions injected
-             * @param min_period Lower limit of random inter-transaction time
-             * @param max_period Upper limit of random inter-transaction time
-             * @param read_percent Percent of transactions that are reads
-             * @param data_limit Upper limit on how much data to read/write
-             */
-            RandomGen(QueuedMasterPort& _port, MasterID master_id,
-                      Tick _duration, Addr start_addr, Addr end_addr,
-                      Addr _blocksize, Tick min_period, Tick max_period,
-                      uint8_t read_percent, Addr data_limit)
-                : BaseGen(_port, master_id, _duration),
-                  startAddr(start_addr), endAddr(end_addr),
-                  blocksize(_blocksize), minPeriod(min_period),
-                  maxPeriod(max_period), readPercent(read_percent),
-                  dataLimit(data_limit)
-            { }
-
-            void enter();
-
-            void execute();
-
-            Tick nextExecuteTick();
-
-          private:
-
-            /** Start of address range */
-            const Addr startAddr;
-
-            /** End of address range */
-            const Addr endAddr;
-
-            /** Block size */
-            const Addr blocksize;
-
-            /** Request generation period */
-            const Tick minPeriod;
-            const Tick maxPeriod;
-
-            /**
-             * Percent of generated transactions that should be reads
-             */
-            const uint8_t readPercent;
-
-            /** Maximum amount of data to manipulate */
-            const Addr dataLimit;
-
-            /**
-             * Counter to determine the amount of data
-             * manipulated. Used to determine if we should continue
-             * generating requests.
-             */
-            Addr dataManipulated;
-        };
-
-        /**
-         * The trace replay generator reads a trace file and plays
-         * back the transactions. The trace is offset with respect to
-         * the time when the state was entered.
-         */
-        class TraceGen : public BaseGen
-        {
-
-          private:
-
-            /**
-             * This struct stores a line in the trace file.
-             */
-            struct TraceElement {
-
-                /** Specifies if the request is to be a read or a write */
-                MemCmd cmd;
-
-                /** The address for the request */
-                Addr addr;
-
-                /** The size of the access for the request */
-                Addr blocksize;
-
-                /** The time at which the request should be sent */
-                Tick tick;
-
-                /**
-                 * Check validity of this element.
-                 *
-                 * @return if this element is valid
-                 */
-                bool isValid() const {
-                    return cmd != MemCmd::InvalidCmd;
-                }
-
-                /**
-                 * Make this element invalid.
-                 */
-                void clear() {
-                    cmd = MemCmd::InvalidCmd;
-                }
-            };
-
-          public:
-
-           /**
-             * Create a trace generator.
-             *
-             * @param _port port used to send requests
-             * @param master_id MasterID set on each request
-             * @param _duration duration of this state before transitioning
-             * @param trace_file File to read the transactions from
-             * @param addr_offset Positive offset to add to trace address
-             */
-            TraceGen(QueuedMasterPort& _port, MasterID master_id,
-                     Tick _duration, const std::string& trace_file,
-                     Addr addr_offset)
-                : BaseGen(_port, master_id, _duration),
-                  traceFile(trace_file),
-                  addrOffset(addr_offset),
-                  traceComplete(false)
-            {
-                /**
-                 * Create a 4MB read buffer for the input trace
-                 * file. This is to reduce the number of disk accesses
-                 * and thereby speed up the execution of the code.
-                 */
-                readBuffer = new char[4 * 1024 * 1024];
-                trace.rdbuf()->pubsetbuf(readBuffer, 4 * 1024 * 1024);
-                trace.open(traceFile.c_str(), std::ifstream::in);
-
-                if (!trace.is_open()) {
-                    fatal("Traffic generator %s trace file could not be"
-                          " opened: %s\n", name(), traceFile);
-                }
-            }
-
-            ~TraceGen() {
-                // free the memory used by the readBuffer
-                delete[] readBuffer;
-            }
-
-            void enter();
-
-            void execute();
-
-            void exit();
-
-            /**
-             * Read a line of the trace file. Returns the raw tick
-             * when the next request should be generated. If the end
-             * of the file has been reached, it returns MaxTick to
-             * indicate that there will be no more requests.
-             */
-            Tick nextExecuteTick();
-
-          private:
-
-            /** Path to the trace file */
-            std::string traceFile;
-
-            /** Input stream used for reading the input trace file */
-            std::ifstream trace;
-
-            /** Larger buffer used for reading from the stream */
-            char* readBuffer;
-
-            /** Store the current and next element in the trace */
-            TraceElement currElement;
-            TraceElement nextElement;
-
-            /**
-             * Stores the time when the state was entered. This is to add an
-             * offset to the times stored in the trace file.
-             */
-            Tick tickOffset;
-
-            /**
-             * Offset for memory requests. Used to shift the trace
-             * away from the CPU address space.
-             */
-            Addr addrOffset;
-
-            /**
-             * Set to true when the trace replay for one instance of
-             * state is complete.
-             */
-            bool traceComplete;
-
-            /**
-             * Used to store the Tick when the next generate should
-             * occur. It is to remove a transaction as soon as we
-             * enter the state.
-             */
-            Tick oldEmitTime;
-        };
-
-        /** Pointer to owner of request handler */
-        TrafficGen& owner;
-
-        /** Pointer to request handler */
-        QueuedMasterPort& port;
-
-        /** State transition matrix */
-        std::vector<std::vector<double> > transitionMatrix;
-
-      public:
-
-        /** Index of the current state */
-        uint32_t currState;
-
-        /** Map of states */
-        m5::hash_map<uint32_t, BaseGen*> states;
+        uint32_t from;
+        uint32_t to;
+        double p;
     };
 
+    /** State transition matrix */
+    std::vector<std::vector<double> > transitionMatrix;
 
-    /** Queued handler */
-    class TrafficGenPort : public QueuedMasterPort
-    {
-      public:
+    /** Index of the current state */
+    uint32_t currState;
 
-        TrafficGenPort(const std::string& name, TrafficGen& _owner)
-            : QueuedMasterPort(name, &_owner, queue), queue(_owner, *this),
-              owner(_owner)
-        { }
+    /** Map of generator states */
+    std::unordered_map<uint32_t, std::shared_ptr<BaseGen>> states;
 
-      protected:
-
-        bool recvTimingResp(PacketPtr pkt);
-
-      private:
-
-        MasterPacketQueue queue;
-
-        // Owner of the port
-        TrafficGen& owner;
-
-    };
-
-    TrafficGenPort port;
-
-    /** Request generator state graph */
-    StateGraph stateGraph;
-
-    /**
-     * Schedules event for next update and executes an update on the
-     * state graph.
-     */
-    void updateStateGraph();
-
-    /** Event for updating the state graph */
-    EventWrapper<TrafficGen,
-                 &TrafficGen::updateStateGraph> updateStateGraphEvent;
-
+  protected: // BaseTrafficGen
+    std::shared_ptr<BaseGen> nextGenerator() override;
 
   public:
 
-    TrafficGen(const TrafficGenParams* p);
+    TrafficGen(const TrafficGenParams &p);
 
     ~TrafficGen() {}
 
-    virtual BaseMasterPort& getMasterPort(const std::string &if_name,
-                                          PortID idx = InvalidPortID);
+    void init() override;
+    void initState() override;
 
-    void init();
-
-    void initState();
-
-    unsigned int drain(Event *drain_event);
-
-    void serialize(std::ostream &os);
-
-    void unserialize(Checkpoint* cp, const std::string& section);
+    void serialize(CheckpointOut &cp) const override;
+    void unserialize(CheckpointIn &cp) override;
 
 };
 
-#endif //__MEM_TRAFFIC_GEN_HH__
+} // namespace gem5
+
+#endif //__CPU_TRAFFIC_GEN_TRAFFIC_GEN_HH__

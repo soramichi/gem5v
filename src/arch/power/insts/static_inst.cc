@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2009 The University of Edinburgh
+ * Copyright (c) 2013 Advanced Micro Devices, Inc.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -24,35 +25,45 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * Authors: Timothy M. Jones
  */
 
 #include "arch/power/insts/static_inst.hh"
 
+#include "cpu/reg_class.hh"
+
+namespace gem5
+{
+
 using namespace PowerISA;
 
 void
-PowerStaticInst::printReg(std::ostream &os, int reg) const
+PowerStaticInst::printReg(std::ostream &os, RegId reg) const
 {
-    if (reg < FP_Base_DepTag) {
-        ccprintf(os, "r%d", reg);
-    } else if (reg < Ctrl_Base_DepTag) {
-        ccprintf(os, "f%d", reg - FP_Base_DepTag);
-    } else {
-        switch (reg - Ctrl_Base_DepTag) {
-        case 0: ccprintf(os, "cr"); break;
-        case 1: ccprintf(os, "xer"); break;
-        case 2: ccprintf(os, "lr"); break;
-        case 3: ccprintf(os, "ctr"); break;
-        default: ccprintf(os, "unknown_reg");
+    switch (reg.classValue()) {
+      case IntRegClass:
+        ccprintf(os, "r%d", reg.index());
+        break;
+      case FloatRegClass:
+        ccprintf(os, "f%d", reg.index());
+        break;
+      case MiscRegClass:
+        switch (reg.index()) {
+          case 0: ccprintf(os, "cr"); break;
+          case 1: ccprintf(os, "xer"); break;
+          case 2: ccprintf(os, "lr"); break;
+          case 3: ccprintf(os, "ctr"); break;
+          default: ccprintf(os, "unknown_reg");
+            break;
         }
+        break;
+      default:
+        panic("printReg: Unrecognized register class.");
     }
 }
 
 std::string
-PowerStaticInst::generateDisassembly(Addr pc,
-                                       const SymbolTable *symtab) const
+PowerStaticInst::generateDisassembly(
+        Addr pc, const loader::SymbolTable *symtab) const
 {
     std::stringstream ss;
 
@@ -60,3 +71,5 @@ PowerStaticInst::generateDisassembly(Addr pc,
 
     return ss.str();
 }
+
+} // namespace gem5

@@ -24,23 +24,24 @@
  * ARISING OUT OF OR IN CONNECTION WITH THE USE OF THE SOFTWARE, EVEN
  * IF IT HAS BEEN OR IS HEREAFTER ADVISED OF THE POSSIBILITY OF SUCH
  * DAMAGES.
- *
- * Authors: Ali G. Saidi
- *          Andrew L. Schultz
- *          Miguel J. Serrano
  */
 
 #ifndef __DEV_8254_HH__
 #define __DEV_8254_HH__
 
+#include <array>
 #include <iostream>
 #include <string>
 
 #include "base/bitunion.hh"
 #include "base/types.hh"
+#include "base/trace.hh"
 #include "debug/Intel8254Timer.hh"
 #include "sim/eventq.hh"
 #include "sim/serialize.hh"
+
+namespace gem5
+{
 
 /** Programmable Interval Timer (Intel 8254) */
 class Intel8254Timer : public EventManager
@@ -53,21 +54,34 @@ class Intel8254Timer : public EventManager
         Bitfield<0> bcd;
     EndBitUnion(CtrlReg)
 
-    enum SelectVal {
+    BitUnion8(ReadBackCommandVal)
+        Bitfield<4> status; // Active low.
+        Bitfield<5> count; // Active low.
+        SubBitUnion(select, 3, 1)
+            Bitfield<3> cnt2;
+            Bitfield<2> cnt1;
+            Bitfield<1> cnt0;
+        EndSubBitUnion(select)
+    EndBitUnion(ReadBackCommandVal)
+
+    enum SelectVal
+    {
         SelectCounter0,
         SelectCounter1,
         SelectCounter2,
         ReadBackCommand
     };
 
-    enum ReadWriteVal {
+    enum ReadWriteVal
+    {
         LatchCommand,
         LsbOnly,
         MsbOnly,
         TwoPhase
     };
 
-    enum ModeVal {
+    enum ModeVal
+    {
         InitTc,
         OneShot,
         RateGen,
@@ -101,6 +115,8 @@ class Intel8254Timer : public EventManager
             void setTo(int clocks);
 
             int clocksLeft();
+
+            Tick getInterval();
         };
 
       private:
@@ -111,6 +127,9 @@ class Intel8254Timer : public EventManager
 
         CounterEvent event;
 
+        /** True after startup is called. */
+        bool running;
+
         /** Initial count value */
         uint16_t initial_count;
 
@@ -119,6 +138,9 @@ class Intel8254Timer : public EventManager
 
         /** Interrupt period */
         uint16_t period;
+
+        /** When to start ticking */
+        Tick offset;
 
         /** Current mode of operation */
         uint8_t mode;
@@ -140,6 +162,8 @@ class Intel8254Timer : public EventManager
 
       public:
         Counter(Intel8254Timer *p, const std::string &name, unsigned int num);
+
+        unsigned int index() const { return num; }
 
         /** Latch the current count (if one is not already latched) */
         void latchCount();
@@ -170,7 +194,7 @@ class Intel8254Timer : public EventManager
          * @param base The base name of the counter object.
          * @param os   The stream to serialize to.
          */
-        void serialize(const std::string &base, std::ostream &os);
+        void serialize(const std::string &base, CheckpointOut &cp) const;
 
         /**
          * Reconstruct the state of this object from a checkpoint.
@@ -178,8 +202,10 @@ class Intel8254Timer : public EventManager
          * @param cp The checkpoint use.
          * @param section The section name of this object
          */
-        void unserialize(const std::string &base, Checkpoint *cp,
-                         const std::string &section);
+        void unserialize(const std::string &base, CheckpointIn &cp);
+
+        /** Start ticking */
+        void startup();
     };
 
   protected:
@@ -187,7 +213,7 @@ class Intel8254Timer : public EventManager
     const std::string &name() const { return _name; }
 
     /** PIT has three seperate counters */
-    Counter *counter[3];
+    std::array<Counter, 3> counters;
 
     virtual void
     counterInterrupt(unsigned int num)
@@ -201,9 +227,6 @@ class Intel8254Timer : public EventManager
     ~Intel8254Timer()
     {}
 
-    Intel8254Timer(EventManager *em, const std::string &name,
-            Counter *counter0, Counter *counter1, Counter *counter2);
-
     Intel8254Timer(EventManager *em, const std::string &name);
 
     /** Write control word */
@@ -213,21 +236,21 @@ class Intel8254Timer : public EventManager
     readCounter(unsigned int num)
     {
         assert(num < 3);
-        return counter[num]->read();
+        return counters[num].read();
     }
 
     void
     writeCounter(unsigned int num, const uint8_t data)
     {
         assert(num < 3);
-        counter[num]->write(data);
+        counters[num].write(data);
     }
 
     bool
     outputHigh(unsigned int num)
     {
         assert(num < 3);
-        return counter[num]->outputHigh();
+        return counters[num].outputHigh();
     }
 
     /**
@@ -235,7 +258,7 @@ class Intel8254Timer : public EventManager
      * @param base The base name of the counter object.
      * @param os The stream to serialize to.
      */
-    void serialize(const std::string &base, std::ostream &os);
+    void serialize(const std::string &base, CheckpointOut &cp) const;
 
     /**
      * Reconstruct the state of this object from a checkpoint.
@@ -243,8 +266,12 @@ class Intel8254Timer : public EventManager
      * @param cp The checkpoint use.
      * @param section The section name of this object
      */
-    void unserialize(const std::string &base, Checkpoint *cp,
-                     const std::string &section);
+    void unserialize(const std::string &base, CheckpointIn &cp);
+
+    /** Start ticking */
+    void startup();
 };
+
+} // namespace gem5
 
 #endif // __DEV_8254_HH__

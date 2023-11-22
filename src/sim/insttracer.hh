@@ -1,4 +1,16 @@
 /*
+ * Copyright (c) 2014, 2017, 2020 ARM Limited
+ * All rights reserved
+ *
+ * The license below extends only to copyright in the software and shall
+ * not be construed as granting a license to any other intellectual
+ * property including but not limited to intellectual property relating
+ * to a hardware implementation of the functionality of the software
+ * licensed hereunder.  You may use the software subject to the license
+ * terms below provided that you ensure that this notice is replicated
+ * unmodified and in its entirety in all distributions of the software,
+ * modified or unmodified, in source code or in binary form.
+ *
  * Copyright (c) 2001-2005 The Regents of The University of Michigan
  * All rights reserved.
  *
@@ -24,24 +36,26 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * Authors: Steve Reinhardt
- *          Nathan Binkert
  */
 
 #ifndef __INSTRECORD_HH__
 #define __INSTRECORD_HH__
 
-#include "base/bigint.hh"
-#include "base/trace.hh"
+#include <memory>
+
+#include "arch/generic/pcstate.hh"
 #include "base/types.hh"
-#include "cpu/inst_seq.hh"      // for InstSeqNum
+#include "cpu/inst_res.hh"
+#include "cpu/inst_seq.hh"
 #include "cpu/static_inst.hh"
 #include "sim/sim_object.hh"
 
+namespace gem5
+{
+
 class ThreadContext;
 
-namespace Trace {
+namespace trace {
 
 class InstRecord
 {
@@ -54,122 +68,238 @@ class InstRecord
     // need to make this ref-counted so it doesn't go away before we
     // dump the record
     StaticInstPtr staticInst;
-    TheISA::PCState pc;
+    std::unique_ptr<PCStateBase> pc;
     StaticInstPtr macroStaticInst;
-    bool misspeculating;
-    bool predicate;
 
     // The remaining fields are only valid for particular instruction
     // types (e.g, addresses for memory ops) or when particular
     // options are enabled (e.g., tracing full register contents).
     // Each data field has an associated valid flag to indicate
     // whether the data field is valid.
-    Addr addr;
-    bool addr_valid;
 
-    union {
-        uint64_t as_int;
-        double as_double;
+    /*** @defgroup mem
+     * @{
+     * Memory request information in the instruction accessed memory.
+     * @see mem_valid
+     */
+    Addr addr = 0; ///< The address that was accessed
+    Addr size = 0; ///< The size of the memory request
+    unsigned flags = 0; ///< The flags that were assigned to the request.
+
+    /** @} */
+
+    /** @defgroup data
+     * If this instruction wrote any data values they're recorded here
+     * WARNING: Instructions are quite loose with with what they write
+     * since many instructions write multiple values (e.g. destintation
+     * register, flags, status, ...) This only captures the last write.
+     * @TODO fix this and record all destintations that an instruction writes
+     * @see data_status
+     */
+    union Data
+    {
+        ~Data() {}
+        Data() {}
+        uint64_t asInt = 0;
+        double asDouble;
+        InstResult asReg;
     } data;
-    enum {
+
+    /** @defgroup fetch_seq
+     * This records the serial number that the instruction was fetched in.
+     * @see fetch_seq_valid
+     */
+    InstSeqNum fetch_seq = 0;
+
+    /** @defgroup commit_seq
+     * This records the instruction number that was committed in the pipeline
+     * @see cp_seq_valid
+     */
+    InstSeqNum cp_seq = 0;
+
+    /** @ingroup data
+     * What size of data was written?
+     */
+    enum DataStatus
+    {
         DataInvalid = 0,
         DataInt8 = 1,   // set to equal number of bytes
         DataInt16 = 2,
         DataInt32 = 4,
         DataInt64 = 8,
-        DataDouble = 3
-    } data_status;
+        DataDouble = 3,
+        DataReg = 5
+    } dataStatus = DataInvalid;
 
-    InstSeqNum fetch_seq;
-    bool fetch_seq_valid;
+    /** @ingroup memory
+     * Are the memory fields in the record valid?
+     */
+    bool mem_valid = false;
 
-    InstSeqNum cp_seq;
-    bool cp_seq_valid;
+    /** @ingroup fetch_seq
+     * Are the fetch sequence number fields valid?
+     */
+    bool fetch_seq_valid = false;
+    /** @ingroup commit_seq
+     * Are the commit sequence number fields valid?
+     */
+    bool cp_seq_valid = false;
+
+    /** is the predicate for execution this inst true or false (not execed)?
+     */
+    bool predicate = true;
+
+    /**
+     * Did the execution of this instruction fault? (requires ExecFaulting
+     * to be enabled)
+     */
+    bool faulting = false;
 
   public:
     InstRecord(Tick _when, ThreadContext *_thread,
-               const StaticInstPtr _staticInst,
-               TheISA::PCState _pc, bool spec,
-               const StaticInstPtr _macroStaticInst = NULL)
-        : when(_when), thread(_thread),
-          staticInst(_staticInst), pc(_pc),
-          macroStaticInst(_macroStaticInst),
-          misspeculating(spec), predicate(true)
-    {
-        data_status = DataInvalid;
-        addr_valid = false;
+               const StaticInstPtr _staticInst, const PCStateBase &_pc,
+               const StaticInstPtr _macroStaticInst=nullptr)
+        : when(_when), thread(_thread), staticInst(_staticInst),
+        pc(_pc.clone()), macroStaticInst(_macroStaticInst)
+    {}
 
-        fetch_seq_valid = false;
-        cp_seq_valid = false;
+    virtual ~InstRecord()
+    {
+        if (dataStatus == DataReg)
+            data.asReg.~InstResult();
     }
 
-    virtual ~InstRecord() { }
+    void setWhen(Tick new_when) { when = new_when; }
+    void
+    setMem(Addr a, Addr s, unsigned f)
+    {
+        addr = a;
+        size = s;
+        flags = f;
+        mem_valid = true;
+    }
 
-    void setAddr(Addr a) { addr = a; addr_valid = true; }
+    template <typename T, size_t N>
+    void
+    setData(std::array<T, N> d)
+    {
+        data.asInt = d[0];
+        dataStatus = (DataStatus)sizeof(T);
+        static_assert(sizeof(T) == DataInt8 || sizeof(T) == DataInt16 ||
+                      sizeof(T) == DataInt32 || sizeof(T) == DataInt64,
+                      "Type T has an unrecognized size.");
+    }
 
-    void setData(Twin64_t d) { data.as_int = d.a; data_status = DataInt64; }
-    void setData(Twin32_t d) { data.as_int = d.a; data_status = DataInt32; }
-    void setData(uint64_t d) { data.as_int = d; data_status = DataInt64; }
-    void setData(uint32_t d) { data.as_int = d; data_status = DataInt32; }
-    void setData(uint16_t d) { data.as_int = d; data_status = DataInt16; }
-    void setData(uint8_t d) { data.as_int = d; data_status = DataInt8; }
+    void
+    setData(uint64_t d)
+    {
+        data.asInt = d;
+        dataStatus = DataInt64;
+    }
+    void
+    setData(uint32_t d)
+    {
+        data.asInt = d;
+        dataStatus = DataInt32;
+    }
+    void
+    setData(uint16_t d)
+    {
+        data.asInt = d;
+        dataStatus = DataInt16;
+    }
+    void
+    setData(uint8_t d)
+    {
+        data.asInt = d;
+        dataStatus = DataInt8;
+    }
 
     void setData(int64_t d) { setData((uint64_t)d); }
     void setData(int32_t d) { setData((uint32_t)d); }
     void setData(int16_t d) { setData((uint16_t)d); }
     void setData(int8_t d)  { setData((uint8_t)d); }
 
-    void setData(double d) { data.as_double = d; data_status = DataDouble; }
+    void
+    setData(double d)
+    {
+        data.asDouble = d;
+        dataStatus = DataDouble;
+    }
 
-    void setFetchSeq(InstSeqNum seq)
-    { fetch_seq = seq; fetch_seq_valid = true; }
+    void
+    setData(const RegClass &reg_class, RegVal val)
+    {
+        new(&data.asReg) InstResult(reg_class, val);
+        dataStatus = DataReg;
+    }
 
-    void setCPSeq(InstSeqNum seq)
-    { cp_seq = seq; cp_seq_valid = true; }
+    void
+    setData(const RegClass &reg_class, const void *val)
+    {
+        new(&data.asReg) InstResult(reg_class, val);
+        dataStatus = DataReg;
+    }
+
+    void
+    setFetchSeq(InstSeqNum seq)
+    {
+        fetch_seq = seq;
+        fetch_seq_valid = true;
+    }
+
+    void
+    setCPSeq(InstSeqNum seq)
+    {
+        cp_seq = seq;
+        cp_seq_valid = true;
+    }
 
     void setPredicate(bool val) { predicate = val; }
 
+    void setFaulting(bool val) { faulting = val; }
+
     virtual void dump() = 0;
-    
+
   public:
-    Tick getWhen() { return when; }
-    ThreadContext *getThread() { return thread; }
-    StaticInstPtr getStaticInst() { return staticInst; }
-    TheISA::PCState getPCState() { return pc; }
-    StaticInstPtr getMacroStaticInst() { return macroStaticInst; }
-    bool getMisspeculating() { return misspeculating; }
+    Tick getWhen() const { return when; }
+    ThreadContext *getThread() const { return thread; }
+    StaticInstPtr getStaticInst() const { return staticInst; }
+    const PCStateBase &getPCState() const { return *pc; }
+    StaticInstPtr getMacroStaticInst() const { return macroStaticInst; }
 
-    Addr getAddr() { return addr; }
-    bool getAddrValid() { return addr_valid; }
+    Addr getAddr() const { return addr; }
+    Addr getSize() const { return size; }
+    unsigned getFlags() const { return flags; }
+    bool getMemValid() const { return mem_valid; }
 
-    uint64_t getIntData() { return data.as_int; }
-    double getFloatData() { return data.as_double; }
-    int getDataStatus() { return data_status; }
+    uint64_t getIntData() const { return data.asInt; }
+    double getFloatData() const { return data.asDouble; }
+    int getDataStatus() const { return dataStatus; }
 
-    InstSeqNum getFetchSeq() { return fetch_seq; }
-    bool getFetchSeqValid() { return fetch_seq_valid; }
+    InstSeqNum getFetchSeq() const { return fetch_seq; }
+    bool getFetchSeqValid() const { return fetch_seq_valid; }
 
-    InstSeqNum getCpSeq() { return cp_seq; }
-    bool getCpSeqValid() { return cp_seq_valid; }
+    InstSeqNum getCpSeq() const { return cp_seq; }
+    bool getCpSeqValid() const { return cp_seq_valid; }
+
+    bool getFaulting() const { return faulting; }
 };
 
 class InstTracer : public SimObject
 {
   public:
-    InstTracer(const Params *p) : SimObject(p)
-    {}
+    InstTracer(const Params &p) : SimObject(p) {}
 
-    virtual ~InstTracer()
-    {};
+    virtual ~InstTracer() {}
 
     virtual InstRecord *
         getInstRecord(Tick when, ThreadContext *tc,
-                const StaticInstPtr staticInst, TheISA::PCState pc,
-                const StaticInstPtr macroStaticInst = NULL) = 0;
+                const StaticInstPtr staticInst, const PCStateBase &pc,
+                const StaticInstPtr macroStaticInst=nullptr) = 0;
 };
 
-
-
-} // namespace Trace
+} // namespace trace
+} // namespace gem5
 
 #endif // __INSTRECORD_HH__

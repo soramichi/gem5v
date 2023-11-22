@@ -24,8 +24,6 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * Authors: Ali Saidi
  */
 
 #ifndef __ARCH_SPARC_PAGETABLE_HH__
@@ -33,18 +31,16 @@
 
 #include <cassert>
 
-#include "arch/sparc/isa_traits.hh"
 #include "base/bitfield.hh"
-#include "base/misc.hh"
+#include "base/logging.hh"
+#include "base/types.hh"
+#include "sim/serialize.hh"
 
-class Checkpoint;
-
-namespace SparcISA {
-
-struct VAddr
+namespace gem5
 {
-    VAddr(Addr a) { panic("not implemented yet."); }
-};
+
+namespace SparcISA
+{
 
 class TteTag
 {
@@ -57,7 +53,7 @@ class TteTag
     TteTag(uint64_t e) : entry(e), populated(true) {}
 
     const TteTag &
-    operator=(uint64_t e) 
+    operator=(uint64_t e)
     {
         populated = true;
         entry = e;
@@ -72,7 +68,8 @@ class TteTag
 class PageTableEntry
 {
   public:
-    enum EntryType {
+    enum EntryType
+    {
       sun4v,
       sun4u,
       invalid
@@ -230,14 +227,18 @@ struct TlbEntry
     TlbEntry()
     {}
 
-    TlbEntry(Addr asn, Addr vaddr, Addr paddr)
+    TlbEntry(Addr asn, Addr vaddr, Addr paddr,
+             bool uncacheable, bool read_only)
     {
         uint64_t entry = 0;
-        entry |= 1ULL << 1; // Writable
+        if (!read_only)
+            entry |= 1ULL << 1; // Writable
         entry |= 0ULL << 2; // Available in nonpriveleged mode
         entry |= 0ULL << 3; // No side effects
-        entry |= 1ULL << 4; // Virtually cachable
-        entry |= 1ULL << 5; // Physically cachable
+        if (!uncacheable) {
+            entry |= 1ULL << 4; // Virtually cachable
+            entry |= 1ULL << 5; // Physically cachable
+        }
         entry |= 0ULL << 6; // Not locked
         entry |= mbits(paddr, 39, 13); // Physical address
         entry |= 0ULL << 48; // size = 8k
@@ -273,11 +274,11 @@ struct TlbEntry
         range.va = new_vaddr;
     }
 
-    void serialize(std::ostream &os);
-    void unserialize(Checkpoint *cp, const std::string &section);
+    void serialize(CheckpointOut &cp) const;
+    void unserialize(CheckpointIn &cp);
 };
 
 } // namespace SparcISA
+} // namespace gem5
 
 #endif // __ARCH_SPARC_PAGE_TABLE_HH__
-

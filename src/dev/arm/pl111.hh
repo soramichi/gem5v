@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010 ARM Limited
+ * Copyright (c) 2010-2012, 2015 ARM Limited
  * All rights reserved
  *
  * The license below extends only to copyright in the software and shall
@@ -33,9 +33,6 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * Authors: William Wang
- *          Ali Saidi
  */
 
 
@@ -47,19 +44,24 @@
 #define __DEV_ARM_PL111_HH__
 
 #include <fstream>
+#include <memory>
 
+#include "base/bmpwriter.hh"
+#include "base/framebuffer.hh"
+#include "base/output.hh"
 #include "dev/arm/amba_device.hh"
 #include "params/Pl111.hh"
 #include "sim/serialize.hh"
 
-class Gic;
-class VncServer;
-class Bitmap;
+namespace gem5
+{
+
+class VncInput;
 
 class Pl111: public AmbaDmaDevice
 {
   protected:
-    static const uint64_t AMBA_ID       = ULL(0xb105f00d00141111);
+    static const uint64_t AMBA_ID       = 0xb105f00d00141111ULL;
     /** ARM PL111 register map*/
     static const int LcdTiming0       = 0x000;
     static const int LcdTiming1       = 0x004;
@@ -96,7 +98,10 @@ class Pl111: public AmbaDmaDevice
     static const int dmaSize            = 8;    // 64 bits
     static const int maxOutstandingDma  = 16;   // 16 deep FIFO of 64 bits
 
-    enum LcdMode {
+    static const int buffer_size = LcdMaxWidth * LcdMaxHeight * sizeof(uint32_t);
+
+    enum LcdMode
+    {
         bpp1 = 0,
         bpp2,
         bpp4,
@@ -161,6 +166,31 @@ class Pl111: public AmbaDmaDevice
         Bitfield<16> watermark;
     EndBitUnion(ControlReg)
 
+    /**
+     * Event wrapper for dmaDone()
+     *
+     * This event calls pushes its this pointer onto the freeDoneEvent
+     * vector and calls dmaDone() when triggered.
+     */
+    class DmaDoneEvent : public Event
+    {
+      private:
+        Pl111 &obj;
+
+      public:
+        DmaDoneEvent(Pl111 *_obj)
+            : Event(), obj(*_obj) {}
+
+        void process() {
+            obj.dmaDoneEventFree.push_back(this);
+            obj.dmaDone();
+        }
+
+        const std::string name() const {
+            return obj.name() + ".DmaDoneEvent";
+        }
+    };
+
     /** Horizontal axis panel control register */
     TimingReg0 lcdTiming0;
 
@@ -174,10 +204,10 @@ class Pl111: public AmbaDmaDevice
     TimingReg3 lcdTiming3;
 
     /** Upper panel frame base address register */
-    int lcdUpbase;
+    uint32_t lcdUpbase;
 
     /** Lower panel frame base address register */
-    int lcdLpbase;
+    uint32_t lcdLpbase;
 
     /** Control register */
     ControlReg lcdControl;
@@ -193,27 +223,27 @@ class Pl111: public AmbaDmaDevice
 
     /** 256x16-bit color palette registers
      * 256 palette entries organized as 128 locations of two entries per word */
-    int lcdPalette[LcdPaletteSize];
+    uint32_t lcdPalette[LcdPaletteSize];
 
     /** Cursor image RAM register
      * 256-word wide values defining images overlaid by the hw cursor mechanism */
-    int cursorImage[CrsrImageSize];
+    uint32_t cursorImage[CrsrImageSize];
 
     /** Cursor control register */
-    int clcdCrsrCtrl;
+    uint32_t clcdCrsrCtrl;
 
     /** Cursor configuration register */
-    int clcdCrsrConfig;
+    uint32_t clcdCrsrConfig;
 
     /** Cursor palette registers */
-    int clcdCrsrPalette0;
-    int clcdCrsrPalette1;
+    uint32_t clcdCrsrPalette0;
+    uint32_t clcdCrsrPalette1;
 
     /** Cursor XY position register */
-    int clcdCrsrXY;
+    uint32_t clcdCrsrXY;
 
     /** Cursor clip position register */
-    int clcdCrsrClip;
+    uint32_t clcdCrsrClip;
 
     /** Cursor interrupt mask set/clear register */
     InterruptReg clcdCrsrImsc;
@@ -227,14 +257,20 @@ class Pl111: public AmbaDmaDevice
     /** Cursor masked interrupt status register - const */
     InterruptReg clcdCrsrMis;
 
+    /** Pixel clock */
+    Tick pixelClock;
+
+    PixelConverter converter;
+    FrameBuffer fb;
+
     /** VNC server */
-    VncServer *vncserver;
+    VncInput *vnc;
 
     /** Helper to write out bitmaps */
-    Bitmap *bmp;
+    BmpWriter bmp;
 
     /** Picture of what the current frame buffer looks like */
-    std::ostream *pic;
+    OutputStream *pic;
 
     /** Frame buffer width - pixels per line */
     uint16_t width;
@@ -261,10 +297,12 @@ class Pl111: public AmbaDmaDevice
     Addr curAddr;
 
     /** DMA FIFO watermark */
-    int waterMark;
+    uint32_t waterMark;
 
     /** Number of pending dma reads */
-    int dmaPendingNum;
+    uint32_t dmaPendingNum;
+
+    PixelConverter pixelConverter() const;
 
     /** Send updated parameters to the vnc server */
     void updateVideoParams();
@@ -288,40 +326,58 @@ class Pl111: public AmbaDmaDevice
     void dmaDone();
 
     /** DMA framebuffer read event */
-    EventWrapper<Pl111, &Pl111::readFramebuffer> readEvent;
+    EventFunctionWrapper readEvent;
 
     /** Fill fifo */
-    EventWrapper<Pl111, &Pl111::fillFifo> fillFifoEvent;
+    EventFunctionWrapper fillFifoEvent;
 
-    /** DMA done event */
-    std::vector<EventWrapper<Pl111, &Pl111::dmaDone> > dmaDoneEvent;
+    /**@{*/
+    /**
+     * All pre-allocated DMA done events
+     *
+     * The PL111 model preallocates maxOutstandingDma number of
+     * DmaDoneEvents to avoid having to heap allocate every single
+     * event when it is needed. In order to keep track of which events
+     * are in flight and which are ready to be used, we use two
+     * different vectors. dmaDoneEventAll contains <i>all</i>
+     * DmaDoneEvents that the object may use, while dmaDoneEventFree
+     * contains a list of currently <i>unused</i> events. When an
+     * event needs to be scheduled, the last element of the
+     * dmaDoneEventFree is used and removed from the list. When an
+     * event fires, it is added to the end of the
+     * dmaEventFreeList. dmaDoneEventAll is never used except for in
+     * initialization and serialization.
+     */
+    std::vector<DmaDoneEvent> dmaDoneEventAll;
+
+    /** Unused DMA done events that are ready to be scheduled */
+    std::vector<DmaDoneEvent *> dmaDoneEventFree;
+    /**@}*/
 
     /** Wrapper to create an event out of the interrupt */
-    EventWrapper<Pl111, &Pl111::generateInterrupt> intEvent;
+    EventFunctionWrapper intEvent;
+
+    bool enableCapture;
 
   public:
-    typedef Pl111Params Params;
-
-    const Params *
-    params() const
-    {
-        return dynamic_cast<const Params *>(_params);
-    }
-    Pl111(const Params *p);
+    using Params = Pl111Params;
+    Pl111(const Params &p);
     ~Pl111();
 
-    virtual Tick read(PacketPtr pkt);
-    virtual Tick write(PacketPtr pkt);
+    Tick read(PacketPtr pkt) override;
+    Tick write(PacketPtr pkt) override;
 
-    virtual void serialize(std::ostream &os);
-    virtual void unserialize(Checkpoint *cp, const std::string &section);
+    void serialize(CheckpointOut &cp) const override;
+    void unserialize(CheckpointIn &cp) override;
 
     /**
      * Determine the address ranges that this device responds to.
      *
      * @return a list of non-overlapping address ranges
      */
-    AddrRangeList getAddrRanges() const;
+    AddrRangeList getAddrRanges() const override;
 };
+
+} // namespace gem5
 
 #endif

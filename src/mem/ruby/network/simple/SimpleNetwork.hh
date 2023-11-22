@@ -1,4 +1,16 @@
 /*
+ * Copyright (c) 2021 ARM Limited
+ * All rights reserved.
+ *
+ * The license below extends only to copyright in the software and shall
+ * not be construed as granting a license to any other intellectual
+ * property including but not limited to intellectual property relating
+ * to a hardware implementation of the functionality of the software
+ * licensed hereunder.  You may use the software subject to the license
+ * terms below provided that you ensure that this notice is replicated
+ * unmodified and in its entirety in all distributions of the software,
+ * modified or unmodified, in source code or in binary form.
+ *
  * Copyright (c) 1999-2008 Mark D. Hill and David A. Wood
  * All rights reserved.
  *
@@ -32,89 +44,78 @@
 #include <iostream>
 #include <vector>
 
-#include "mem/ruby/common/Global.hh"
 #include "mem/ruby/network/Network.hh"
 #include "params/SimpleNetwork.hh"
-#include "sim/sim_object.hh"
+
+namespace gem5
+{
+
+namespace ruby
+{
 
 class NetDest;
 class MessageBuffer;
 class Throttle;
 class Switch;
-class Topology;
 
 class SimpleNetwork : public Network
 {
   public:
-    typedef SimpleNetworkParams Params;
-    SimpleNetwork(const Params *p);
-    ~SimpleNetwork();
+    PARAMS(SimpleNetwork);
+
+    SimpleNetwork(const Params &p);
+    ~SimpleNetwork() = default;
 
     void init();
 
     int getBufferSize() { return m_buffer_size; }
     int getEndpointBandwidth() { return m_endpoint_bandwidth; }
-    bool getAdaptiveRouting() {return m_adaptive_routing; }
 
-    void printStats(std::ostream& out) const;
-    void clearStats();
-    void reset();
+    void collateStats();
+    void regStats();
 
-    // returns the queue requested for the given component
-    MessageBuffer* getToNetQueue(NodeID id, bool ordered, int network_num, std::string vnet_type);
-    MessageBuffer* getFromNetQueue(NodeID id, bool ordered, int network_num, std::string vnet_type);
-    virtual const std::vector<Throttle*>* getThrottles(NodeID id) const;
-
-    bool isVNetOrdered(int vnet) { return m_ordered[vnet]; }
-    bool validVirtualNetwork(int vnet) { return m_in_use[vnet]; }
-
-    int getNumNodes() {return m_nodes; }
+    bool isVNetOrdered(int vnet) const { return m_ordered[vnet]; }
 
     // Methods used by Topology to setup the network
-    void makeOutLink(SwitchID src, NodeID dest, BasicLink* link, 
-                     LinkDirection direction, 
-                     const NetDest& routing_table_entry, 
-                     bool isReconfiguration);
-    void makeInLink(NodeID src, SwitchID dest, BasicLink* link, 
-                    LinkDirection direction, 
-                    const NetDest& routing_table_entry, 
-                    bool isReconfiguration);
+    void makeExtOutLink(SwitchID src, NodeID dest, BasicLink* link,
+                     std::vector<NetDest>& routing_table_entry);
+    void makeExtInLink(NodeID src, SwitchID dest, BasicLink* link,
+                    std::vector<NetDest>& routing_table_entry);
     void makeInternalLink(SwitchID src, SwitchID dest, BasicLink* link,
-                          LinkDirection direction, 
-                          const NetDest& routing_table_entry, 
-                          bool isReconfiguration);
+                          std::vector<NetDest>& routing_table_entry,
+                          PortDirection src_outport,
+                          PortDirection dst_inport);
 
     void print(std::ostream& out) const;
 
     bool functionalRead(Packet *pkt);
+    bool functionalRead(Packet *pkt, WriteMask &mask);
     uint32_t functionalWrite(Packet *pkt);
 
   private:
-    void checkNetworkAllocation(NodeID id, bool ordered, int network_num);
     void addLink(SwitchID src, SwitchID dest, int link_latency);
     void makeLink(SwitchID src, SwitchID dest,
         const NetDest& routing_table_entry, int link_latency);
-    SwitchID createSwitch();
     void makeTopology();
-    void linkTopology();
 
     // Private copy constructor and assignment operator
     SimpleNetwork(const SimpleNetwork& obj);
     SimpleNetwork& operator=(const SimpleNetwork& obj);
 
-    // vector of queues from the components
-    std::vector<std::vector<MessageBuffer*> > m_toNetQueues;
-    std::vector<std::vector<MessageBuffer*> > m_fromNetQueues;
+    std::unordered_map<int, Switch*> m_switches;
+    std::vector<MessageBuffer*> m_int_link_buffers;
+    const int m_buffer_size;
+    const int m_endpoint_bandwidth;
 
-    std::vector<bool> m_in_use;
-    std::vector<bool> m_ordered;
-    std::vector<Switch*> m_switch_ptr_vector;
-    std::vector<MessageBuffer*> m_buffers_to_free;
-    std::vector<Switch*> m_endpoint_switches;
 
-    int m_buffer_size;
-    int m_endpoint_bandwidth;
-    bool m_adaptive_routing;    
+    struct NetworkStats : public statistics::Group
+    {
+        NetworkStats(statistics::Group *parent);
+
+        //Statistical variables
+        statistics::Formula* m_msg_counts[MessageSizeType_NUM];
+        statistics::Formula* m_msg_bytes[MessageSizeType_NUM];
+    } networkStats;
 };
 
 inline std::ostream&
@@ -124,5 +125,8 @@ operator<<(std::ostream& out, const SimpleNetwork& obj)
     out << std::flush;
     return out;
 }
+
+} // namespace ruby
+} // namespace gem5
 
 #endif // __MEM_RUBY_NETWORK_SIMPLE_SIMPLENETWORK_HH__

@@ -1,4 +1,18 @@
 /*
+ * Copyright 2015 LabWare
+ * Copyright 2014 Google, Inc.
+ * Copyright (c) 2013, 2016, 2018-2019 ARM Limited
+ * All rights reserved
+ *
+ * The license below extends only to copyright in the software and shall
+ * not be construed as granting a license to any other intellectual
+ * property including but not limited to intellectual property relating
+ * to a hardware implementation of the functionality of the software
+ * licensed hereunder.  You may use the software subject to the license
+ * terms below provided that you ensure that this notice is replicated
+ * unmodified and in its entirety in all distributions of the software,
+ * modified or unmodified, in source code or in binary form.
+ *
  * Copyright (c) 2002-2005 The Regents of The University of Michigan
  * Copyright (c) 2007-2008 The Florida State University
  * All rights reserved.
@@ -25,48 +39,98 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * Authors: Nathan Binkert
- *          Stephen Hines
  */
 
 #ifndef __ARCH_ARM_REMOTE_GDB_HH__
 #define __ARCH_ARM_REMOTE_GDB_HH__
 
+#include <algorithm>
+
+#include "arch/arm/regs/vec.hh"
+#include "arch/arm/utility.hh"
+#include "base/compiler.hh"
 #include "base/remote_gdb.hh"
+
+namespace gem5
+{
 
 class System;
 class ThreadContext;
 
 namespace ArmISA
 {
-// registers for arm with vfpv3/neon
-const int NUMREGS   = 41;  /* r0-r15, cpsr, d0-d31, fpscr */
-const int REG_R0 = 0;
-const int REG_F0 = 8;
-const int REG_CPSR  = 8;   /* bit 512 to bit 543  */
-const int REG_FPSCR = 40;  /* bit 2592 to bit 2623 */
 
 class RemoteGDB : public BaseRemoteGDB
 {
+  protected:
+    bool acc(Addr addr, size_t len) override;
 
-protected:
-  Addr notTakenBkpt;
-  Addr takenBkpt;
+    class AArch32GdbRegCache : public BaseGdbRegCache
+    {
+      using BaseGdbRegCache::BaseGdbRegCache;
+      protected:
+        struct GEM5_PACKED
+        {
+          uint32_t gpr[16];
+          uint32_t cpsr;
+          uint64_t fpr[32];
+          uint32_t fpscr;
+        } r;
+      public:
+        char *data() const override { return (char *)&r; }
+        size_t size() const override { return sizeof(r); }
+        void getRegs(ThreadContext*) override;
+        void setRegs(ThreadContext*) const override;
+        const std::string
+        name() const override
+        {
+            return gdb->name() + ".AArch32GdbRegCache";
+        }
+    };
 
-protected:
-  bool acc(Addr addr, size_t len);
-  bool write(Addr addr, size_t size, const char *data);
+    class AArch64GdbRegCache : public BaseGdbRegCache
+    {
+      using BaseGdbRegCache::BaseGdbRegCache;
+      protected:
+        struct GEM5_PACKED
+        {
+          uint64_t x[31];
+          uint64_t spx;
+          uint64_t pc;
+          uint32_t cpsr;
+          VecElem v[NumVecV8ArchRegs * NumVecElemPerNeonVecReg];
+          uint32_t fpsr;
+          uint32_t fpcr;
+        } r;
+      public:
+        char *data() const override { return (char *)&r; }
+        size_t size() const override { return sizeof(r); }
+        void getRegs(ThreadContext*) override;
+        void setRegs(ThreadContext*) const override;
+        const std::string
+        name() const override
+        {
+            return gdb->name() + ".AArch64GdbRegCache";
+        }
+    };
 
-  void getregs();
-  void setregs();
+    AArch32GdbRegCache regCache32;
+    AArch64GdbRegCache regCache64;
 
-  void clearSingleStep();
-  void setSingleStep();
-
-public:
-  RemoteGDB(System *_system, ThreadContext *tc);
+  public:
+    RemoteGDB(System *_system, ListenSocketConfig _listen_config);
+    BaseGdbRegCache *gdbRegs() override;
+    bool checkBpKind(size_t kind) override;
+    std::vector<std::string>
+    availableFeatures() const override
+    {
+        return {"qXfer:features:read+"};
+    };
+    bool getXferFeaturesRead(const std::string &annex,
+                             std::string &output) override;
 };
+
 } // namespace ArmISA
+} // namespace gem5
 
 #endif /* __ARCH_ARM_REMOTE_GDB_H__ */

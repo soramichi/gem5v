@@ -1,6 +1,6 @@
 # -*- mode:python -*-
 
-# Copyright (c) 2009 ARM Limited
+# Copyright (c) 2009, 2013, 2015, 2021 Arm Limited
 # All rights reserved.
 #
 # The license below extends only to copyright in the software and shall
@@ -34,24 +34,32 @@
 # THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-#
-# Authors: Ali Saidi
 
 from m5.SimObject import SimObject
 from m5.params import *
 from m5.proxy import *
-from MemObject import MemObject
+from m5.objects.BaseTLB import BaseTLB
 
-class ArmTableWalker(MemObject):
-    type = 'ArmTableWalker'
-    cxx_class = 'ArmISA::TableWalker'
-    port = MasterPort("Port for TableWalker to do walk the translation with")
+
+class ArmLookupLevel(Enum):
+    vals = ["L0", "L1", "L2", "L3"]
+
+
+class ArmTLB(BaseTLB):
+    type = "ArmTLB"
+    cxx_class = "gem5::ArmISA::TLB"
+    cxx_header = "arch/arm/tlb.hh"
     sys = Param.System(Parent.any, "system object parameter")
-    num_squash_per_cycle = Param.Unsigned(2,
-            "Number of outstanding walks that can be squashed per cycle")
-
-class ArmTLB(SimObject):
-    type = 'ArmTLB'
-    cxx_class = 'ArmISA::TLB'
     size = Param.Int(64, "TLB size")
-    walker = Param.ArmTableWalker(ArmTableWalker(), "HW Table walker")
+    is_stage2 = Param.Bool(False, "Is this a stage 2 TLB?")
+
+    partial_levels = VectorParam.ArmLookupLevel(
+        [],
+        "List of intermediate lookup levels allowed to be cached in the TLB "
+        "(=holding intermediate PAs obtained during a table walk",
+    )
+
+
+class ArmStage2TLB(ArmTLB):
+    size = 32
+    is_stage2 = True

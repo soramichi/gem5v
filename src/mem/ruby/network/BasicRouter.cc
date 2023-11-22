@@ -28,10 +28,17 @@
 
 #include "mem/ruby/network/BasicRouter.hh"
 
-BasicRouter::BasicRouter(const Params *p)
-    : SimObject(p)
+namespace gem5
 {
-    m_id = p->router_id;
+
+namespace ruby
+{
+
+BasicRouter::BasicRouter(const Params &p)
+    : ClockedObject(p)
+{
+    m_id = p.router_id;
+    m_latency = p.latency;
 }
 
 void
@@ -45,8 +52,5 @@ BasicRouter::print(std::ostream& out) const
     out << name();
 }
 
-BasicRouter *
-BasicRouterParams::create()
-{
-    return new BasicRouter(this);
-}
+} // namespace ruby
+} // namespace gem5

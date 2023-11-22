@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2014, 2019, 2021 Arm Limited
+ * All rights reserved
+ *
  * Copyright (c) 2001-2006 The Regents of The University of Michigan
  * All rights reserved.
  *
@@ -24,42 +27,142 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * Authors: Nathan Binkert
- *          Steve Reinhardt
  */
 
 #ifndef __BASE_TRACE_HH__
 #define __BASE_TRACE_HH__
 
+#include <ostream>
 #include <string>
+#include <sstream>
 
+#include "base/compiler.hh"
 #include "base/cprintf.hh"
 #include "base/debug.hh"
+#include "base/logging.hh"
 #include "base/match.hh"
 #include "base/types.hh"
-#include "sim/core.hh"
+#include "sim/cur_tick.hh"
 
-namespace Trace {
+// Return the global context name "global".  This function gets called when
+// the DPRINTF macros are used in a context without a visible name() function
+// @todo This should be moved to the gem5 namespace
+const std::string &name();
 
-using Debug::SimpleFlag;
-using Debug::CompoundFlag;
+namespace gem5
+{
 
+namespace trace {
+
+/** Debug logging base class.  Handles formatting and outputting
+ *  time/name/message messages */
+class Logger
+{
+  protected:
+    /** Name match for objects to ignore */
+    ObjectMatch ignore;
+    /** Name match for objects to activate log */
+    ObjectMatch activate;
+
+    bool isEnabled(const std::string &name) const
+    {
+        if (name.empty()) // Enable the logger with a empty name.
+            return true;
+        bool ignore_match = ignore.match(name);
+        bool activate_match = activate.match(name);
+        if (ignore_match && activate_match)
+            panic("%s in both ignore and activate.\n", name);
+        if (ignore_match)
+            return false;
+        if (!activate.empty() && !activate_match)
+            return false;
+        return true;
+    }
+
+  public:
+    /** Log a single message */
+    template <typename ...Args>
+    void dprintf(Tick when, const std::string &name, const char *fmt,
+                 const Args &...args)
+    {
+        dprintf_flag(when, name, "", fmt, args...);
+    }
+
+    /** Log a single message with a flag prefix. */
+    template <typename ...Args>
+    void dprintf_flag(Tick when, const std::string &name,
+            const std::string &flag,
+            const char *fmt, const Args &...args)
+    {
+        if (!isEnabled(name))
+            return;
+        std::ostringstream line;
+        ccprintf(line, fmt, args...);
+        logMessage(when, name, flag, line.str());
+    }
+
+    /** Dump a block of data of length len */
+    void dump(Tick when, const std::string &name,
+            const void *d, int len, const std::string &flag);
+
+    /** Log formatted message */
+    virtual void logMessage(Tick when, const std::string &name,
+            const std::string &flag, const std::string &message) = 0;
+
+    /** Return an ostream that can be used to send messages to
+     *  the 'same place' as formatted logMessage messages.  This
+     *  can be implemented to use a logger's underlying ostream,
+     *  to provide an ostream which formats the output in some
+     *  way, or just set to one of std::cout, std::cerr */
+    virtual std::ostream &getOstream() = 0;
+
+    /** Set objects to ignore */
+    void setIgnore(ObjectMatch &ignore_) { ignore = ignore_; }
+
+    /** Add objects to ignore */
+    void addIgnore(const ObjectMatch &ignore_) { ignore.add(ignore_); }
+
+    /** Set objects to activate */
+    void setActivate(ObjectMatch &activate_) { activate = activate_; }
+
+    /** Add objects to activate */
+    void addActivate(const ObjectMatch &activate_) { activate.add(activate_); }
+
+    virtual ~Logger() { }
+};
+
+/** Logging wrapper for ostreams with the format:
+ *  <when>: <name>: <message-body> */
+class OstreamLogger : public Logger
+{
+  protected:
+    std::ostream &stream;
+
+  public:
+    OstreamLogger(std::ostream &stream_) : stream(stream_)
+    { }
+
+    void logMessage(Tick when, const std::string &name,
+            const std::string &flag, const std::string &message) override;
+
+    std::ostream &getOstream() override { return stream; }
+};
+
+/** Get the current global debug logger.  This takes ownership of the given
+ *  logger which should be allocated using 'new' */
+Logger *getDebugLogger();
+
+/** Get the ostream from the current global logger */
 std::ostream &output();
-void setOutput(const std::string &filename);
 
-extern bool enabled;
-bool changeFlag(const char *str, bool value);
-void dumpStatus();
+/** Delete the current global logger and assign a new one */
+void setDebugLogger(Logger *logger);
 
-extern ObjectMatch ignore;
-extern const std::string DefaultName;
+/** Enable/disable debug logging */
+void enable();
+void disable();
 
-void dprintf(Tick when, const std::string &name, const char *format,
-             CPRINTF_DECLARATION);
-void dump(Tick when, const std::string &name, const void *data, int len);
-
-} // namespace Trace
+} // namespace trace
 
 // This silly little class allows us to wrap a string in a functor
 // object so that we can give a name() that DPRINTF will like
@@ -70,69 +173,94 @@ struct StringWrap
     const std::string &operator()() const { return str; }
 };
 
-inline const std::string &name() { return Trace::DefaultName; }
+/**
+ * DPRINTF is a debugging trace facility that allows one to
+ * selectively enable tracing statements.  To use DPRINTF, there must
+ * be a function or functor called name() that returns a const
+ * std::string & in the current scope.
+ *
+ * If you desire that the automatic printing not occur, use DPRINTFR
+ * (R for raw)
+ *
+ * With DPRINTFV it is possible to pass a debug::SimpleFlag variable
+ * as first argument. Example:
+ *
+ * debug::Flag some_flag = debug::DMA;
+ * DPRINTFV(some_flag, ...);
+ *
+ * \def DDUMP(x, data, count)
+ * \def DPRINTF(x, ...)
+ * \def DPRINTFS(x, s, ...)
+ * \def DPRINTFR(x, ...)
+ * \def DPRINTFV(x, ...)
+ * \def DPRINTFN(...)
+ * \def DPRINTFNR(...)
+ * \def DPRINTF_UNCONDITIONAL(x, ...) (deprecated)
+ *
+ * @ingroup api_trace
+ * @{
+ */
 
-//
-// DPRINTF is a debugging trace facility that allows one to
-// selectively enable tracing statements.  To use DPRINTF, there must
-// be a function or functor called name() that returns a const
-// std::string & in the current scope.
-//
-// If you desire that the automatic printing not occur, use DPRINTFR
-// (R for raw)
-//
-
-#if TRACING_ON
-
-#define DTRACE(x) ((Debug::x) && Trace::enabled)
-
-#define DDUMP(x, data, count) do {                              \
-    using namespace Debug;                                      \
-    if (DTRACE(x))                                              \
-        Trace::dump(curTick(), name(), data, count);              \
+#define DDUMP(x, data, count) do {               \
+    if (GEM5_UNLIKELY(TRACING_ON && ::gem5::debug::x))     \
+        ::gem5::trace::getDebugLogger()->dump(           \
+            ::gem5::curTick(), name(), data, count, #x); \
 } while (0)
 
-#define DPRINTF(x, ...) do {                                    \
-    using namespace Debug;                                      \
-    if (DTRACE(x))                                              \
-        Trace::dprintf(curTick(), name(), __VA_ARGS__);           \
+#define DPRINTF(x, ...) do {                     \
+    if (GEM5_UNLIKELY(TRACING_ON && ::gem5::debug::x)) {   \
+        ::gem5::trace::getDebugLogger()->dprintf_flag(   \
+            ::gem5::curTick(), name(), #x, __VA_ARGS__); \
+    }                                            \
 } while (0)
 
-#define DPRINTFS(x, s, ...) do {                                \
-    using namespace Debug;                                      \
-    if (DTRACE(x))                                              \
-        Trace::dprintf(curTick(), s->name(), __VA_ARGS__);      \
+#define DPRINTFS(x, s, ...) do {                        \
+    if (GEM5_UNLIKELY(TRACING_ON && ::gem5::debug::x)) {          \
+        ::gem5::trace::getDebugLogger()->dprintf_flag(          \
+                ::gem5::curTick(), (s)->name(), #x, __VA_ARGS__); \
+    }                                                   \
 } while (0)
 
-#define DPRINTFR(x, ...) do {                                   \
-    using namespace Debug;                                      \
-    if (DTRACE(x))                                              \
-        Trace::dprintf((Tick)-1, std::string(), __VA_ARGS__);   \
+#define DPRINTFR(x, ...) do {                          \
+    if (GEM5_UNLIKELY(TRACING_ON && ::gem5::debug::x)) {         \
+        ::gem5::trace::getDebugLogger()->dprintf_flag(         \
+            (::gem5::Tick)-1, std::string(), #x, __VA_ARGS__); \
+    }                                                  \
 } while (0)
 
-#define DDUMPN(data, count) do {                                \
-    Trace::dump(curTick(), name(), data, count);                  \
+#define DPRINTFV(x, ...) do {                          \
+    if (GEM5_UNLIKELY(TRACING_ON && (x))) {              \
+        ::gem5::trace::getDebugLogger()->dprintf_flag(         \
+            ::gem5::curTick(), name(), x.name(), __VA_ARGS__); \
+    }                                                  \
 } while (0)
 
-#define DPRINTFN(...) do {                                      \
-    Trace::dprintf(curTick(), name(), __VA_ARGS__);               \
+#define DPRINTFN(...) do {                                                \
+    if (TRACING_ON) {                                                     \
+        ::gem5::trace::getDebugLogger()->dprintf( \
+            ::gem5::curTick(), name(), __VA_ARGS__); \
+    }                                                                     \
 } while (0)
 
-#define DPRINTFNR(...) do {                                     \
-    Trace::dprintf((Tick)-1, string(), __VA_ARGS__);            \
+#define DPRINTFNR(...) do {                                          \
+    if (TRACING_ON) {                                                \
+        ::gem5::trace::getDebugLogger()->dprintf( \
+            (::gem5::Tick)-1, "", __VA_ARGS__); \
+    }                                                                \
 } while (0)
 
-#else // !TRACING_ON
+#define DPRINTF_UNCONDITIONAL(x, ...)                      \
+    GEM5_DEPRECATED_MACRO_STMT(DPRINTF_UNCONDITIONAL,      \
+    do {                                                   \
+        if (TRACING_ON) {                                  \
+            ::gem5::trace::getDebugLogger()->dprintf_flag(         \
+                ::gem5::curTick(), name(), #x, __VA_ARGS__);       \
+        }                                                  \
+    } while (0),                                           \
+    "Use DPRINTFN or DPRINTF with a debug flag instead.")
 
-#define DTRACE(x) (false)
-#define DDUMP(x, data, count) do {} while (0)
-#define DPRINTF(x, ...) do {} while (0)
-#define DPRINTFS(x, ...) do {} while (0)
-#define DPRINTFR(...) do {} while (0)
-#define DDUMPN(data, count) do {} while (0)
-#define DPRINTFN(...) do {} while (0)
-#define DPRINTFNR(...) do {} while (0)
+/** @} */ // end of api_trace
 
-#endif  // TRACING_ON
+} // namespace gem5
 
 #endif // __BASE_TRACE_HH__

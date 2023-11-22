@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010 ARM Limited
+ * Copyright (c) 2010-2012, 2015 ARM Limited
  * All rights reserved
  *
  * The license below extends only to copyright in the software and shall
@@ -33,55 +33,60 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * Authors: William Wang
- *          Ali Saidi
  */
 
-#include "base/vnc/vncserver.hh"
-#include "base/bitmap.hh"
+#include "dev/arm/pl111.hh"
+
 #include "base/output.hh"
 #include "base/trace.hh"
+#include "base/vnc/vncinput.hh"
 #include "debug/PL111.hh"
 #include "debug/Uart.hh"
 #include "dev/arm/amba_device.hh"
-#include "dev/arm/gic.hh"
-#include "dev/arm/pl111.hh"
+#include "dev/arm/base_gic.hh"
 #include "mem/packet.hh"
 #include "mem/packet_access.hh"
+#include "sim/system.hh"
 
 // clang complains about std::set being overloaded with Packet::set if
 // we open up the entire namespace std
 using std::vector;
 
-using namespace AmbaDev;
+namespace gem5
+{
 
 // initialize clcd registers
-Pl111::Pl111(const Params *p)
-    : AmbaDmaDevice(p), lcdTiming0(0), lcdTiming1(0), lcdTiming2(0),
+Pl111::Pl111(const Params &p)
+    : AmbaDmaDevice(p, 0x10000), lcdTiming0(0), lcdTiming1(0), lcdTiming2(0),
       lcdTiming3(0), lcdUpbase(0), lcdLpbase(0), lcdControl(0), lcdImsc(0),
       lcdRis(0), lcdMis(0),
       clcdCrsrCtrl(0), clcdCrsrConfig(0), clcdCrsrPalette0(0),
       clcdCrsrPalette1(0), clcdCrsrXY(0), clcdCrsrClip(0), clcdCrsrImsc(0),
       clcdCrsrIcr(0), clcdCrsrRis(0), clcdCrsrMis(0),
-      vncserver(p->vnc), bmp(NULL), width(LcdMaxWidth), height(LcdMaxHeight),
+      pixelClock(p.pixel_clock),
+      converter(PixelConverter::rgba8888_le), fb(LcdMaxWidth, LcdMaxHeight),
+      vnc(p.vnc), bmp(&fb), pic(NULL),
+      width(LcdMaxWidth), height(LcdMaxHeight),
       bytesPerPixel(4), startTime(0), startAddr(0), maxAddr(0), curAddr(0),
-      waterMark(0), dmaPendingNum(0), readEvent(this), fillFifoEvent(this),
-      dmaDoneEvent(maxOutstandingDma, this), intEvent(this)
+      waterMark(0), dmaPendingNum(0),
+      readEvent([this]{ readFramebuffer(); }, name()),
+      fillFifoEvent([this]{ fillFifo(); }, name()),
+      dmaDoneEventAll(maxOutstandingDma, this),
+      dmaDoneEventFree(maxOutstandingDma),
+      intEvent([this]{ generateInterrupt(); }, name()),
+      enableCapture(p.enable_capture)
 {
-    pioSize = 0xFFFF;
-
-    pic = simout.create(csprintf("%s.framebuffer.bmp", sys->name()), true);
-
-    const int buffer_size = LcdMaxWidth * LcdMaxHeight * sizeof(uint32_t);
     dmaBuffer = new uint8_t[buffer_size];
 
     memset(lcdPalette, 0, sizeof(lcdPalette));
     memset(cursorImage, 0, sizeof(cursorImage));
     memset(dmaBuffer, 0, buffer_size);
 
-    if (vncserver)
-        vncserver->setFramebufferAddr(dmaBuffer);
+    for (int i = 0; i < maxOutstandingDma; ++i)
+        dmaDoneEventFree[i] = &dmaDoneEventAll[i];
+
+    if (vnc)
+        vnc->setFrameBuffer(&fb);
 }
 
 Pl111::~Pl111()
@@ -102,7 +107,6 @@ Pl111::read(PacketPtr pkt)
            pkt->getAddr() < pioAddr + pioSize);
 
     Addr daddr = pkt->getAddr() - pioAddr;
-    pkt->allocate();
 
     DPRINTF(PL111, " read register %#x size=%d\n", daddr, pkt->getSize());
 
@@ -177,9 +181,9 @@ Pl111::read(PacketPtr pkt)
         data = clcdCrsrMis;
         break;
       default:
-        if (AmbaDev::readId(pkt, AMBA_ID, pioAddr)) {
+        if (readId(pkt, AMBA_ID, pioAddr)) {
             // Hack for variable size accesses
-            data = pkt->get<uint32_t>();
+            data = pkt->getUintX(ByteOrder::little);
             break;
         } else if (daddr >= CrsrImage && daddr <= 0xBFC) {
             // CURSOR IMAGE
@@ -194,27 +198,13 @@ Pl111::read(PacketPtr pkt)
             data = lcdPalette[index];
             break;
         } else {
-            panic("Tried to read CLCD register at offset %#x that \
-                       doesn't exist\n", daddr);
+            panic("Tried to read CLCD register at offset %#x that "
+                       "doesn't exist\n", daddr);
             break;
         }
     }
 
-    switch(pkt->getSize()) {
-      case 1:
-        pkt->set<uint8_t>(data);
-        break;
-      case 2:
-        pkt->set<uint16_t>(data);
-        break;
-      case 4:
-        pkt->set<uint32_t>(data);
-        break;
-      default:
-        panic("CLCD controller read size too big?\n");
-        break;
-    }
-
+    pkt->setUintX(data, ByteOrder::little);
     pkt->makeAtomicResponse();
     return pioDelay;
 }
@@ -226,22 +216,7 @@ Pl111::write(PacketPtr pkt)
     // use a temporary data since the LCD registers are read/written with
     // different size operations
     //
-    uint32_t data = 0;
-
-    switch(pkt->getSize()) {
-      case 1:
-        data = pkt->get<uint8_t>();
-        break;
-      case 2:
-        data = pkt->get<uint16_t>();
-        break;
-      case 4:
-        data = pkt->get<uint32_t>();
-        break;
-      default:
-        panic("PL111 CLCD controller write size too big?\n");
-        break;
-    }
+    const uint32_t data = pkt->getUintX(ByteOrder::little);
 
     assert(pkt->getAddr() >= pioAddr &&
            pkt->getAddr() < pioAddr + pioSize);
@@ -249,7 +224,7 @@ Pl111::write(PacketPtr pkt)
     Addr daddr = pkt->getAddr() - pioAddr;
 
     DPRINTF(PL111, " write register %#x value %#x size=%d\n", daddr,
-            pkt->get<uint8_t>(), pkt->getSize());
+            pkt->getLE<uint8_t>(), pkt->getSize());
 
     switch (daddr) {
       case LcdTiming0:
@@ -300,7 +275,7 @@ Pl111::write(PacketPtr pkt)
         lcdMis = lcdImsc & lcdRis;
 
         if (!lcdMis)
-            gic->clearInt(intNum);
+            interrupt->clear();
 
          break;
       case LcdRis:
@@ -314,7 +289,7 @@ Pl111::write(PacketPtr pkt)
         lcdMis = lcdImsc & lcdRis;
 
         if (!lcdMis)
-            gic->clearInt(intNum);
+            interrupt->clear();
 
         break;
       case LcdUpCurr:
@@ -367,8 +342,8 @@ Pl111::write(PacketPtr pkt)
             lcdPalette[index] = data;
             break;
         } else {
-            panic("Tried to write PL111 register at offset %#x that \
-                       doesn't exist\n", daddr);
+            panic("Tried to write PL111 register at offset %#x that "
+                       "doesn't exist\n", daddr);
             break;
         }
     }
@@ -377,45 +352,66 @@ Pl111::write(PacketPtr pkt)
     return pioDelay;
 }
 
+PixelConverter
+Pl111::pixelConverter() const
+{
+    unsigned rw, gw, bw;
+    unsigned offsets[3];
+
+    switch (lcdControl.lcdbpp) {
+      case bpp24:
+        rw = gw = bw = 8;
+        offsets[0] = 0;
+        offsets[1] = 8;
+        offsets[2] = 16;
+        break;
+
+      case bpp16m565:
+        rw = 5;
+        gw = 6;
+        bw = 5;
+        offsets[0] = 0;
+        offsets[1] = 5;
+        offsets[2] = 11;
+        break;
+
+      default:
+        panic("Unimplemented video mode\n");
+    }
+
+    if (lcdControl.bgr) {
+        return PixelConverter(
+            bytesPerPixel,
+            offsets[2], offsets[1], offsets[0],
+            rw, gw, bw,
+            ByteOrder::little);
+    } else {
+        return PixelConverter(
+            bytesPerPixel,
+            offsets[0], offsets[1], offsets[2],
+            rw, gw, bw,
+            ByteOrder::little);
+    }
+}
+
 void
 Pl111::updateVideoParams()
 {
-        if (lcdControl.lcdbpp == bpp24) {
-            bytesPerPixel = 4;
-        } else if (lcdControl.lcdbpp == bpp16m565) {
-            bytesPerPixel = 2;
-        }
+    if (lcdControl.lcdbpp == bpp24) {
+        bytesPerPixel = 4;
+    } else if (lcdControl.lcdbpp == bpp16m565) {
+        bytesPerPixel = 2;
+    }
 
-        if (vncserver) {
-            if (lcdControl.lcdbpp == bpp24 && lcdControl.bgr)
-                vncserver->setFrameBufferParams(VideoConvert::bgr8888, width,
-                       height);
-            else if (lcdControl.lcdbpp == bpp24 && !lcdControl.bgr)
-                vncserver->setFrameBufferParams(VideoConvert::rgb8888, width,
-                       height);
-            else if (lcdControl.lcdbpp == bpp16m565 && lcdControl.bgr)
-                vncserver->setFrameBufferParams(VideoConvert::bgr565, width,
-                       height);
-            else if (lcdControl.lcdbpp == bpp16m565 && !lcdControl.bgr)
-                vncserver->setFrameBufferParams(VideoConvert::rgb565, width,
-                       height);
-            else
-                panic("Unimplemented video mode\n");
-        }
+    fb.resize(width, height);
+    converter = pixelConverter();
 
-        if (bmp)
-            delete bmp;
-
-        if (lcdControl.lcdbpp == bpp24 && lcdControl.bgr)
-            bmp = new Bitmap(VideoConvert::bgr8888, width, height, dmaBuffer);
-        else if (lcdControl.lcdbpp == bpp24 && !lcdControl.bgr)
-            bmp = new Bitmap(VideoConvert::rgb8888, width, height, dmaBuffer);
-        else if (lcdControl.lcdbpp == bpp16m565 && lcdControl.bgr)
-            bmp = new Bitmap(VideoConvert::bgr565, width, height, dmaBuffer);
-        else if (lcdControl.lcdbpp == bpp16m565 && !lcdControl.bgr)
-            bmp = new Bitmap(VideoConvert::rgb565, width, height, dmaBuffer);
-        else
-            panic("Unimplemented video mode\n");
+    // Workaround configuration bugs where multiple display
+    // controllers are attached to the same VNC server by reattaching
+    // enabled devices. This isn't ideal, but works as long as only
+    // one display controller is active at a time.
+    if (lcdControl.lcdpwr && vnc)
+        vnc->setFrameBuffer(&fb);
 }
 
 void
@@ -437,16 +433,14 @@ Pl111::readFramebuffer()
     // Updating base address, interrupt if we're supposed to
     lcdRis.baseaddr = 1;
     if (!intEvent.scheduled())
-        schedule(intEvent, nextCycle());
+        schedule(intEvent, clockEdge());
 
     curAddr = 0;
-    startTime = curCycle();
+    startTime = curTick();
 
     maxAddr = static_cast<Addr>(length * bytesPerPixel);
 
     DPRINTF(PL111, " lcd frame buffer size of %d bytes \n", maxAddr);
-
-    dmaPendingNum = 0;
 
     fillFifo();
 }
@@ -459,14 +453,17 @@ Pl111::fillFifo()
         // due to assertion in scheduling state
         ++dmaPendingNum;
 
-        assert(!dmaDoneEvent[dmaPendingNum-1].scheduled());
+        assert(!dmaDoneEventFree.empty());
+        DmaDoneEvent *event(dmaDoneEventFree.back());
+        dmaDoneEventFree.pop_back();
+        assert(!event->scheduled());
 
         // We use a uncachable request here because the requests from the CPU
         // will be uncacheable as well. If we have uncacheable and cacheable
         // requests in the memory system for the same address it won't be
         // pleased
         dmaPort.dmaAction(MemCmd::ReadReq, curAddr + startAddr, dmaSize,
-                          &dmaDoneEvent[dmaPendingNum-1], curAddr + dmaBuffer,
+                          event, curAddr + dmaBuffer,
                           0, Request::UNCACHEABLE);
         curAddr += dmaSize;
     }
@@ -475,50 +472,56 @@ Pl111::fillFifo()
 void
 Pl111::dmaDone()
 {
-    Cycles maxFrameTime(lcdTiming2.cpl * height);
+    DPRINTF(PL111, "DMA Done\n");
+
+    Tick maxFrameTime = lcdTiming2.cpl * height * pixelClock;
 
     --dmaPendingNum;
 
     if (maxAddr == curAddr && !dmaPendingNum) {
-        if ((curCycle() - startTime) > maxFrameTime) {
-            warn("CLCD controller buffer underrun, took %d cycles when should"
+        if ((curTick() - startTime) > maxFrameTime) {
+            warn("CLCD controller buffer underrun, took %d ticks when should"
                  " have taken %d\n", curTick() - startTime, maxFrameTime);
             lcdRis.underflow = 1;
             if (!intEvent.scheduled())
-                schedule(intEvent, nextCycle());
+                schedule(intEvent, clockEdge());
         }
 
         assert(!readEvent.scheduled());
-        if (vncserver)
-            vncserver->setDirty();
+        fb.copyIn(dmaBuffer, converter);
+        if (vnc)
+            vnc->setDirty();
 
-        DPRINTF(PL111, "-- write out frame buffer into bmp\n");
+        if (enableCapture) {
+            DPRINTF(PL111, "-- write out frame buffer into bmp\n");
 
-        assert(bmp);
-        pic->seekp(0);
-        bmp->write(pic);
+            if (!pic)
+                pic = simout.create(csprintf("%s.framebuffer.bmp", sys->name()),
+                                    true);
+
+            assert(pic);
+            pic->stream()->seekp(0);
+            bmp.write(*pic->stream());
+        }
 
         // schedule the next read based on when the last frame started
         // and the desired fps (i.e. maxFrameTime), we turn the
-        // argument into a relative number of cycles in the future by
-        // subtracting curCycle()
+        // argument into a relative number of cycles in the future
         if (lcdControl.lcden)
-            // @todo: This is a terrible way of doing the time
-            // keeping, make it all relative
-            schedule(readEvent,
-                     clockEdge(Cycles(startTime - curCycle() +
-                                      maxFrameTime)));
+            schedule(readEvent, clockEdge(ticksToCycles(startTime -
+                                                        curTick() +
+                                                        maxFrameTime)));
     }
 
     if (dmaPendingNum > (maxOutstandingDma - waterMark))
         return;
 
     if (!fillFifoEvent.scheduled())
-        schedule(fillFifoEvent, nextCycle());
+        schedule(fillFifoEvent, clockEdge());
 }
 
 void
-Pl111::serialize(std::ostream &os)
+Pl111::serialize(CheckpointOut &cp) const
 {
     DPRINTF(PL111, "Serializing ARM PL111\n");
 
@@ -575,7 +578,7 @@ Pl111::serialize(std::ostream &os)
     SERIALIZE_SCALAR(width);
     SERIALIZE_SCALAR(bytesPerPixel);
 
-    SERIALIZE_ARRAY(dmaBuffer, height * width);
+    SERIALIZE_ARRAY(dmaBuffer, buffer_size);
     SERIALIZE_SCALAR(startTime);
     SERIALIZE_SCALAR(startAddr);
     SERIALIZE_SCALAR(maxAddr);
@@ -601,14 +604,14 @@ Pl111::serialize(std::ostream &os)
     vector<Tick> dma_done_event_tick;
     dma_done_event_tick.resize(maxOutstandingDma);
     for (int x = 0; x < maxOutstandingDma; x++) {
-        dma_done_event_tick[x] = dmaDoneEvent[x].scheduled() ?
-            dmaDoneEvent[x].when() : 0;
+        dma_done_event_tick[x] = dmaDoneEventAll[x].scheduled() ?
+            dmaDoneEventAll[x].when() : 0;
     }
-    arrayParamOut(os, "dma_done_event_tick", dma_done_event_tick);
+    SERIALIZE_CONTAINER(dma_done_event_tick);
 }
 
 void
-Pl111::unserialize(Checkpoint *cp, const std::string &section)
+Pl111::unserialize(CheckpointIn &cp)
 {
     DPRINTF(PL111, "Unserializing ARM PL111\n");
 
@@ -677,7 +680,7 @@ Pl111::unserialize(Checkpoint *cp, const std::string &section)
     UNSERIALIZE_SCALAR(width);
     UNSERIALIZE_SCALAR(bytesPerPixel);
 
-    UNSERIALIZE_ARRAY(dmaBuffer, height * width);
+    UNSERIALIZE_ARRAY(dmaBuffer, buffer_size);
     UNSERIALIZE_SCALAR(startTime);
     UNSERIALIZE_SCALAR(startAddr);
     UNSERIALIZE_SCALAR(maxAddr);
@@ -702,16 +705,21 @@ Pl111::unserialize(Checkpoint *cp, const std::string &section)
 
     vector<Tick> dma_done_event_tick;
     dma_done_event_tick.resize(maxOutstandingDma);
-    arrayParamIn(cp, section, "dma_done_event_tick", dma_done_event_tick);
+    UNSERIALIZE_CONTAINER(dma_done_event_tick);
+    dmaDoneEventFree.clear();
     for (int x = 0; x < maxOutstandingDma; x++) {
         if (dma_done_event_tick[x])
-            schedule(dmaDoneEvent[x], dma_done_event_tick[x]);
+            schedule(dmaDoneEventAll[x], dma_done_event_tick[x]);
+        else
+            dmaDoneEventFree.push_back(&dmaDoneEventAll[x]);
     }
+    assert(maxOutstandingDma - dmaDoneEventFree.size() == dmaPendingNum);
 
     if (lcdControl.lcdpwr) {
         updateVideoParams();
-        if (vncserver)
-            vncserver->setDirty();
+        fb.copyIn(dmaBuffer, converter);
+        if (vnc)
+            vnc->setDirty();
     }
 }
 
@@ -723,7 +731,7 @@ Pl111::generateInterrupt()
     lcdMis = lcdImsc & lcdRis;
 
     if (lcdMis.underflow || lcdMis.baseaddr || lcdMis.vcomp || lcdMis.ahbmaster) {
-        gic->sendInt(intNum);
+        interrupt->raise();
         DPRINTF(PL111, " -- Generated\n");
     }
 }
@@ -736,10 +744,4 @@ Pl111::getAddrRanges() const
     return ranges;
 }
 
-Pl111 *
-Pl111Params::create()
-{
-    return new Pl111(this);
-}
-
-
+} // namespace gem5

@@ -27,6 +27,7 @@
 
 from slicc.util import PairContainer, Location
 
+
 class AST(PairContainer):
     def __init__(self, slicc, pairs=None):
         self.slicc = slicc
@@ -53,8 +54,9 @@ class AST(PairContainer):
         if args:
             message = message % args
         code = self.slicc.codeFormatter()
-        code('''
-panic("Runtime Error at ${{self.location}}, Ruby Time: %d, %s.\\n",
-    g_system_ptr->getTime(), $message);
-''')
+        code(
+            """
+panic("Runtime Error at ${{self.location}}: %s.\\n", $message);
+"""
+        )
         return code

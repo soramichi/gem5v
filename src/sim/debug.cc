@@ -24,31 +24,32 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * Authors: Nathan Binkert
- *          Steve Reinhardt
  */
 
-#include <Python.h>
+#include "sim/debug.hh"
 
 #include <string>
 #include <vector>
 
 #include "base/debug.hh"
-#include "sim/debug.hh"
+#include "cpu/pc_event.hh"
 #include "sim/eventq.hh"
+#include "sim/global_event.hh"
+#include "sim/kernel_workload.hh"
 #include "sim/sim_events.hh"
 #include "sim/sim_exit.hh"
+#include "sim/system.hh"
 
-using namespace std;
+namespace gem5
+{
 
 //
 // Debug event: place a breakpoint on the process function and
 // schedule the event to break at a particular cycle
 //
-struct DebugBreakEvent : public Event
+struct DebugBreakEvent : public GlobalEvent
 {
-    DebugBreakEvent();
+    DebugBreakEvent(Tick when);
     void process();     // process event
     virtual const char *description() const;
 };
@@ -56,8 +57,8 @@ struct DebugBreakEvent : public Event
 //
 // constructor: schedule at specified time
 //
-DebugBreakEvent::DebugBreakEvent()
-    : Event(Debug_Break_Pri, AutoDelete)
+DebugBreakEvent::DebugBreakEvent(Tick when)
+    : GlobalEvent(when, Debug_Break_Pri, AutoDelete)
 {
 }
 
@@ -67,7 +68,7 @@ DebugBreakEvent::DebugBreakEvent()
 void
 DebugBreakEvent::process()
 {
-    Debug::breakpoint();
+    debug::breakpoint();
 }
 
 
@@ -82,10 +83,16 @@ DebugBreakEvent::description() const
 // (callable from debugger)
 //
 void
-schedBreakCycle(Tick when)
+schedBreak(Tick when)
 {
-    mainEventQueue.schedule(new DebugBreakEvent, when);
+    new DebugBreakEvent(when);
     warn("need to stop all queues");
+}
+
+void
+schedRelBreak(Tick delta)
+{
+    schedBreak(curTick() + delta);
 }
 
 ///
@@ -102,39 +109,9 @@ takeCheckpoint(Tick when)
 void
 eventqDump()
 {
-    mainEventQueue.dump();
-    warn("need to dump all queues");
+    for (uint32_t i = 0; i < numMainEventQueues; ++i) {
+        mainEventQueue[i]->dump();
+    }
 }
 
-void
-py_interact()
-{
-    PyObject *globals;
-    PyObject *locals;
-
-    globals = PyEval_GetGlobals();
-    Py_INCREF(globals);
-    locals = PyDict_New();
-    PyRun_String("import code", Py_file_input, globals, locals);
-    PyRun_String("code.interact(local=globals())", Py_file_input,
-                 globals, locals);
-    Py_DECREF(globals);
-    Py_DECREF(locals);
-}
-
-int remote_gdb_base_port = 7000;
-
-int
-getRemoteGDBPort()
-{
-    return remote_gdb_base_port;
-}
-
-// Set remote GDB base port.  0 means disable remote GDB.
-// Callable from python.
-void
-setRemoteGDBPort(int port)
-{
-    remote_gdb_base_port = port;
-}
-
+} // namespace gem5

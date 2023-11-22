@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012 ARM Limited
+ * Copyright (c) 2012-2013 ARM Limited
  * All rights reserved
  *
  * The license below extends only to copyright in the software and shall
@@ -36,9 +36,6 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * Authors: Ron Dreslinski
- *          Andreas Hansson
  */
 
 /**
@@ -46,18 +43,25 @@
  * SimpleMemory declaration
  */
 
-#ifndef __SIMPLE_MEMORY_HH__
-#define __SIMPLE_MEMORY_HH__
+#ifndef __MEM_SIMPLE_MEMORY_HH__
+#define __MEM_SIMPLE_MEMORY_HH__
+
+#include <list>
 
 #include "mem/abstract_mem.hh"
-#include "mem/tport.hh"
+#include "mem/port.hh"
 #include "params/SimpleMemory.hh"
+
+namespace gem5
+{
+
+namespace memory
+{
 
 /**
  * The simple memory is a basic single-ported memory controller with
- * an configurable throughput and latency, potentially with a variance
- * added to the latter. It uses a QueueSlavePort to avoid dealing with
- * the flow control of sending responses.
+ * a configurable throughput and latency.
+ *
  * @sa  \ref gem5MemorySystem "gem5 Memory System"
  */
 class SimpleMemory : public AbstractMemory
@@ -65,37 +69,67 @@ class SimpleMemory : public AbstractMemory
 
   private:
 
-    class MemoryPort : public QueuedSlavePort
+    /**
+     * A deferred packet stores a packet along with its scheduled
+     * transmission time
+     */
+    class DeferredPacket
     {
-
-      private:
-
-        /// Queue holding the response packets
-        SlavePacketQueue queueImpl;
-        SimpleMemory& memory;
 
       public:
 
+        const Tick tick;
+        const PacketPtr pkt;
+
+        DeferredPacket(PacketPtr _pkt, Tick _tick) : tick(_tick), pkt(_pkt)
+        { }
+    };
+
+    class MemoryPort : public ResponsePort
+    {
+      private:
+        SimpleMemory& mem;
+
+      public:
         MemoryPort(const std::string& _name, SimpleMemory& _memory);
 
       protected:
-
-        Tick recvAtomic(PacketPtr pkt);
-
-        void recvFunctional(PacketPtr pkt);
-
-        bool recvTimingReq(PacketPtr pkt);
-
-        AddrRangeList getAddrRanges() const;
-
+        Tick recvAtomic(PacketPtr pkt) override;
+        Tick recvAtomicBackdoor(
+                PacketPtr pkt, MemBackdoorPtr &_backdoor) override;
+        void recvFunctional(PacketPtr pkt) override;
+        void recvMemBackdoorReq(const MemBackdoorReq &req,
+                MemBackdoorPtr &backdoor) override;
+        bool recvTimingReq(PacketPtr pkt) override;
+        void recvRespRetry() override;
+        AddrRangeList getAddrRanges() const override;
     };
 
     MemoryPort port;
 
-    Tick lat;
-    Tick lat_var;
+    /**
+     * Latency from that a request is accepted until the response is
+     * ready to be sent.
+     */
+    const Tick latency;
 
-    /// Bandwidth in ticks per byte
+    /**
+     * Fudge factor added to the latency.
+     */
+    const Tick latency_var;
+
+    /**
+     * Internal (unbounded) storage to mimic the delay caused by the
+     * actual memory access. Note that this is where the packet spends
+     * the memory latency.
+     */
+    std::list<DeferredPacket> packetQueue;
+
+    /**
+     * Bandwidth in ticks per byte. The regulation affects the
+     * acceptance rate of requests and the queueing takes place after
+     * the regulation.
+     */
     const double bandwidth;
 
     /**
@@ -111,31 +145,61 @@ class SimpleMemory : public AbstractMemory
     bool retryReq;
 
     /**
+     * Remember if we failed to send a response and are awaiting a
+     * retry. This is only used as a check.
+     */
+    bool retryResp;
+
+    /**
      * Release the memory after being busy and send a retry if a
      * request was rejected in the meanwhile.
      */
     void release();
 
-    EventWrapper<SimpleMemory, &SimpleMemory::release> releaseEvent;
+    EventFunctionWrapper releaseEvent;
+
+    /**
+     * Dequeue a packet from our internal packet queue and move it to
+     * the port where it will be sent as soon as possible.
+     */
+    void dequeue();
+
+    EventFunctionWrapper dequeueEvent;
+
+    /**
+     * Detemine the latency.
+     *
+     * @return the latency seen by the current packet
+     */
+    Tick getLatency() const;
+
+    /**
+     * Upstream caches need this packet until true is returned, so
+     * hold it for deletion until a subsequent call
+     */
+    std::unique_ptr<Packet> pendingDelete;
 
   public:
 
-    SimpleMemory(const SimpleMemoryParams *p);
-    virtual ~SimpleMemory() { }
+    SimpleMemory(const SimpleMemoryParams &p);
 
-    unsigned int drain(Event* de);
+    DrainState drain() override;
 
-    virtual BaseSlavePort& getSlavePort(const std::string& if_name,
-                                        PortID idx = InvalidPortID);
-    virtual void init();
+    Port &getPort(const std::string &if_name,
+                  PortID idx=InvalidPortID) override;
+    void init() override;
 
   protected:
-
-    Tick doAtomicAccess(PacketPtr pkt);
-    void doFunctionalAccess(PacketPtr pkt);
+    Tick recvAtomic(PacketPtr pkt);
+    Tick recvAtomicBackdoor(PacketPtr pkt, MemBackdoorPtr &_backdoor);
+    void recvFunctional(PacketPtr pkt);
+    void recvMemBackdoorReq(const MemBackdoorReq &req,
+            MemBackdoorPtr &backdoor);
     bool recvTimingReq(PacketPtr pkt);
-    Tick calculateLatency(PacketPtr pkt);
-
+    void recvRespRetry();
 };
 
-#endif //__SIMPLE_MEMORY_HH__
+} // namespace memory
+} // namespace gem5
+
+#endif //__MEM_SIMPLE_MEMORY_HH__

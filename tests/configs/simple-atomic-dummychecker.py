@@ -1,5 +1,5 @@
-# Copyright (c) 2011 ARM Limited
-# All rights reserved
+# Copyright (c) 2013 ARM Limited
+# All rights reserved.
 #
 # The license below extends only to copyright in the software and shall
 # not be construed as granting a license to any other intellectual
@@ -32,20 +32,10 @@
 # THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-#
-# Authors: Geoffrey Blake
 
-import m5
 from m5.objects import *
+from base_config import *
 
-system = System(cpu = AtomicSimpleCPU(cpu_id=0),
-                physmem = SimpleMemory(),
-                membus = CoherentBus())
-system.system_port = system.membus.slave
-system.physmem.port = system.membus.master
-system.cpu.addCheckerCpu()
-system.cpu.createInterruptController()
-system.cpu.connectAllPorts(system.membus)
-system.cpu.clock = '2GHz'
-
-root = Root(full_system = False, system = system)
+root = BaseSESystemUniprocessor(
+    mem_mode="atomic", cpu_class=AtomicSimpleCPU, checker=True
+).create_root()

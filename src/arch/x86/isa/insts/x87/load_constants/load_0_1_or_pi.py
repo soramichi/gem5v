@@ -1,4 +1,5 @@
 # Copyright (c) 2007 The Hewlett-Packard Development Company
+# Copyright (c) 2013 Mark D. Hill and David A. Wood
 # All rights reserved.
 #
 # The license below extends only to copyright in the software and shall
@@ -32,11 +33,22 @@
 # THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-#
-# Authors: Gabe Black
 
-microcode = '''
-# FLDZ
-# FLD1
-# FLDPI
-'''
+microcode = """
+
+def macroop FLDZ {
+    lfpimm ufp1, 0.0
+    movfp st(-1), ufp1, spm=-1
+};
+
+def macroop FLD1 {
+    lfpimm ufp1, 1.0
+    movfp st(-1), ufp1, spm=-1
+};
+
+def macroop FLDPI {
+    lfpimm ufp1, 3.14159265359
+    movfp st(-1), ufp1, spm=-1
+};
+
+"""

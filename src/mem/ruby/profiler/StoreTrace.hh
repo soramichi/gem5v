@@ -31,14 +31,21 @@
 
 #include <iostream>
 
+#include "base/types.hh"
 #include "mem/ruby/common/Address.hh"
 #include "mem/ruby/common/Histogram.hh"
+
+namespace gem5
+{
+
+namespace ruby
+{
 
 class StoreTrace
 {
   public:
     StoreTrace() { }
-    explicit StoreTrace(const Address& addr);
+    explicit StoreTrace(Addr addr);
     ~StoreTrace();
 
     void store(NodeID node);
@@ -52,20 +59,20 @@ class StoreTrace
 
   private:
     static bool s_init;
-    static int64 s_total_samples; // Total number of store lifetimes
+    static int64_t s_total_samples; // Total number of store lifetimes
                                   // of all lines
     static Histogram* s_store_count_ptr;
     static Histogram* s_store_first_to_stolen_ptr;
     static Histogram* s_store_last_to_stolen_ptr;
     static Histogram* s_store_first_to_last_ptr;
 
-    Address m_addr;
+    Addr m_addr;
     NodeID m_last_writer;
-    Time m_first_store;
-    Time m_last_store;
+    Tick m_first_store;
+    Tick m_last_store;
     int m_stores_this_interval;
 
-    int64 m_total_samples; // Total number of store lifetimes of this line
+    int64_t m_total_samples; // Total number of store lifetimes of this line
     Histogram m_store_count;
     Histogram m_store_first_to_stolen;
     Histogram m_store_last_to_stolen;
@@ -85,5 +92,8 @@ operator<<(std::ostream& out, const StoreTrace& obj)
     out << std::flush;
     return out;
 }
+
+} // namespace ruby
+} // namespace gem5
 
 #endif // __MEM_RUBY_PROFILER_STORETRACE_HH__

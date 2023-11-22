@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011 ARM Limited
+ * Copyright (c) 2011, 2014 ARM Limited
  * All rights reserved
  *
  * The license below extends only to copyright in the software and shall
@@ -36,17 +36,23 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * Authors: Kevin Lim
  */
 
-#ifndef __CPU_O3_2BIT_LOCAL_PRED_HH__
-#define __CPU_O3_2BIT_LOCAL_PRED_HH__
+#ifndef __CPU_PRED_2BIT_LOCAL_PRED_HH__
+#define __CPU_PRED_2BIT_LOCAL_PRED_HH__
 
 #include <vector>
 
+#include "base/sat_counter.hh"
 #include "base/types.hh"
-#include "cpu/o3/sat_counter.hh"
+#include "cpu/pred/bpred_unit.hh"
+#include "params/LocalBP.hh"
+
+namespace gem5
+{
+
+namespace branch_prediction
+{
 
 /**
  * Implements a local predictor that uses the PC to index into a table of
@@ -55,17 +61,15 @@
  * predictor state that needs to be recorded or updated; the update can be
  * determined solely by the branch being taken or not taken.
  */
-class LocalBP
+class LocalBP : public BPredUnit
 {
   public:
     /**
      * Default branch predictor constructor.
-     * @param localPredictorSize Size of the local predictor.
-     * @param localCtrBits Number of bits per counter.
-     * @param instShiftAmt Offset amount for instructions to ignore alignment.
      */
-    LocalBP(unsigned localPredictorSize, unsigned localCtrBits,
-            unsigned instShiftAmt);
+    LocalBP(const LocalBPParams &params);
+
+    virtual void uncondBranch(ThreadID tid, Addr pc, void * &bp_history);
 
     /**
      * Looks up the given address in the branch predictor and returns
@@ -74,7 +78,7 @@ class LocalBP
      * @param bp_history Pointer to any bp history state.
      * @return Whether or not the branch is taken.
      */
-    bool lookup(Addr &branch_addr, void * &bp_history);
+    bool lookup(ThreadID tid, Addr branch_addr, void * &bp_history);
 
     /**
      * Updates the branch predictor to Not Taken if a BTB entry is
@@ -83,19 +87,18 @@ class LocalBP
      * @param bp_history Pointer to any bp history state.
      * @return Whether or not the branch is taken.
      */
-    void BTBUpdate(Addr &branch_addr, void * &bp_history);
+    void btbUpdate(ThreadID tid, Addr branch_addr, void * &bp_history);
 
     /**
      * Updates the branch predictor with the actual result of a branch.
      * @param branch_addr The address of the branch to update.
      * @param taken Whether or not the branch was taken.
      */
-    void update(Addr &branch_addr, bool taken, void *bp_history);
+    void update(ThreadID tid, Addr branch_addr, bool taken, void *bp_history,
+                bool squashed, const StaticInstPtr & inst, Addr corrTarget);
 
-    void squash(void *bp_history)
+    void squash(ThreadID tid, void *bp_history)
     { assert(bp_history == NULL); }
-
-    void reset();
 
   private:
     /**
@@ -109,23 +112,23 @@ class LocalBP
     /** Calculates the local index based on the PC. */
     inline unsigned getLocalIndex(Addr &PC);
 
-    /** Array of counters that make up the local predictor. */
-    std::vector<SatCounter> localCtrs;
-
     /** Size of the local predictor. */
-    unsigned localPredictorSize;
-
-    /** Number of sets. */
-    unsigned localPredictorSets;
+    const unsigned localPredictorSize;
 
     /** Number of bits of the local predictor's counters. */
-    unsigned localCtrBits;
+    const unsigned localCtrBits;
 
-    /** Number of bits to shift the PC when calculating index. */
-    unsigned instShiftAmt;
+    /** Number of sets. */
+    const unsigned localPredictorSets;
+
+    /** Array of counters that make up the local predictor. */
+    std::vector<SatCounter8> localCtrs;
 
     /** Mask to get index bits. */
-    unsigned indexMask;
+    const unsigned indexMask;
 };
 
-#endif // __CPU_O3_2BIT_LOCAL_PRED_HH__
+} // namespace branch_prediction
+} // namespace gem5
+
+#endif // __CPU_PRED_2BIT_LOCAL_PRED_HH__

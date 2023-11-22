@@ -33,8 +33,6 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * Authors: Gabe Black
  */
 
 #ifndef __ARCH_X86_PAGE_TABLE_WALKER_HH__
@@ -42,43 +40,39 @@
 
 #include <vector>
 
+#include "arch/generic/mmu.hh"
 #include "arch/x86/pagetable.hh"
 #include "arch/x86/tlb.hh"
 #include "base/types.hh"
-#include "mem/mem_object.hh"
 #include "mem/packet.hh"
 #include "params/X86PagetableWalker.hh"
+#include "sim/clocked_object.hh"
 #include "sim/faults.hh"
 #include "sim/system.hh"
+
+namespace gem5
+{
 
 class ThreadContext;
 
 namespace X86ISA
 {
-    class Walker : public MemObject
+    class Walker : public ClockedObject
     {
       protected:
         // Port for accessing memory
-        class WalkerPort : public MasterPort
+        class WalkerPort : public RequestPort
         {
           public:
             WalkerPort(const std::string &_name, Walker * _walker) :
-                  MasterPort(_name, _walker), walker(_walker)
+                  RequestPort(_name), walker(_walker)
             {}
 
           protected:
             Walker *walker;
 
             bool recvTimingResp(PacketPtr pkt);
-
-            /**
-             * Snooping a coherence request, do nothing.
-             */
-            void recvTimingSnoopReq(PacketPtr pkt) { }
-            Tick recvAtomicSnoop(PacketPtr pkt) { return 0; }
-            void recvFunctionalSnoop(PacketPtr pkt) { }
-            void recvRetry();
-            bool isSnooping() const { return true; }
+            void recvReqRetry();
         };
 
         friend class WalkerPort;
@@ -87,8 +81,10 @@ namespace X86ISA
         // State to track each walk of the page table
         class WalkerState
         {
+          friend class Walker;
           private:
-            enum State {
+            enum State
+            {
                 Ready,
                 Waiting,
                 // Long mode
@@ -112,31 +108,34 @@ namespace X86ISA
             PacketPtr read;
             std::vector<PacketPtr> writes;
             Fault timingFault;
-            TLB::Translation * translation;
-            BaseTLB::Mode mode;
+            BaseMMU::Translation * translation;
+            BaseMMU::Mode mode;
             bool functional;
             bool timing;
             bool retrying;
             bool started;
+            bool squashed;
           public:
-            WalkerState(Walker * _walker, BaseTLB::Translation *_translation,
-                    RequestPtr _req, bool _isFunctional = false) :
-                        walker(_walker), req(_req), state(Ready),
-                        nextState(Ready), inflight(0),
-                        translation(_translation),
-                        functional(_isFunctional), timing(false),
-                        retrying(false), started(false)
+            WalkerState(Walker * _walker, BaseMMU::Translation *_translation,
+                        const RequestPtr &_req, bool _isFunctional = false) :
+                walker(_walker), req(_req), state(Ready),
+                nextState(Ready), inflight(0),
+                translation(_translation),
+                functional(_isFunctional), timing(false),
+                retrying(false), started(false), squashed(false)
             {
             }
-            void initState(ThreadContext * _tc, BaseTLB::Mode _mode,
+            void initState(ThreadContext * _tc, BaseMMU::Mode _mode,
                            bool _isTiming = false);
             Fault startWalk();
             Fault startFunctional(Addr &addr, unsigned &logBytes);
             bool recvPacket(PacketPtr pkt);
+            unsigned numInflight() const;
             bool isRetrying();
             bool wasStarted();
             bool isTiming();
             void retry();
+            void squash();
             std::string name() const {return walker->name();}
 
           private:
@@ -157,30 +156,39 @@ namespace X86ISA
         struct WalkerSenderState : public Packet::SenderState
         {
             WalkerState * senderWalk;
-            Packet::SenderState * saved;
-            WalkerSenderState(WalkerState * _senderWalk,
-                    Packet::SenderState * _saved) :
-                senderWalk(_senderWalk), saved(_saved) {}
+            WalkerSenderState(WalkerState * _senderWalk) :
+                senderWalk(_senderWalk) {}
         };
 
       public:
         // Kick off the state machine.
-        Fault start(ThreadContext * _tc, BaseTLB::Translation *translation,
-                RequestPtr req, BaseTLB::Mode mode);
+        Fault start(ThreadContext * _tc, BaseMMU::Translation *translation,
+                const RequestPtr &req, BaseMMU::Mode mode);
         Fault startFunctional(ThreadContext * _tc, Addr &addr,
-                unsigned &logBytes, BaseTLB::Mode mode);
-        BaseMasterPort &getMasterPort(const std::string &if_name,
-                                      PortID idx = InvalidPortID);
+                unsigned &logBytes, BaseMMU::Mode mode);
+        Port &getPort(const std::string &if_name,
+                      PortID idx=InvalidPortID) override;
 
       protected:
         // The TLB we're supposed to load.
         TLB * tlb;
         System * sys;
-        MasterID masterId;
+        RequestorID requestorId;
+
+        // The number of outstanding walks that can be squashed per cycle.
+        unsigned numSquashable;
+
+        // Wrapper for checking for squashes before starting a translation.
+        void startWalkWrapper();
+
+        /**
+         * Event used to call startWalkWrapper.
+         **/
+        EventFunctionWrapper startWalkWrapperEvent;
 
         // Functions for dealing with packets.
         bool recvTimingResp(PacketPtr pkt);
-        void recvRetry();
+        void recvReqRetry();
         bool sendTiming(WalkerState * sendingState, PacketPtr pkt);
 
       public:
@@ -190,20 +198,19 @@ namespace X86ISA
             tlb = _tlb;
         }
 
-        typedef X86PagetableWalkerParams Params;
+        using Params = X86PagetableWalkerParams;
 
-        const Params *
-        params() const
-        {
-            return static_cast<const Params *>(_params);
-        }
-
-        Walker(const Params *params) :
-            MemObject(params), port(name() + ".port", this),
-            funcState(this, NULL, NULL, true), tlb(NULL), sys(params->system),
-            masterId(sys->getMasterId(name()))
+        Walker(const Params &params) :
+            ClockedObject(params), port(name() + ".port", this),
+            funcState(this, NULL, NULL, true), tlb(NULL), sys(params.system),
+            requestorId(sys->getRequestorId(this)),
+            numSquashable(params.num_squash_per_cycle),
+            startWalkWrapperEvent([this]{ startWalkWrapper(); }, name())
         {
         }
     };
-}
+
+} // namespace X86ISA
+} // namespace gem5
+
 #endif // __ARCH_X86_PAGE_TABLE_WALKER_HH__

@@ -1,4 +1,5 @@
-# Copyright (c) 2012 ARM Limited
+# Copyright (c) 2012-2013, 2015-2017 ARM Limited
+# Copyright (c) 2020 Barkhausen Institut
 # All rights reserved.
 #
 # The license below extends only to copyright in the software and shall
@@ -36,219 +37,284 @@
 # THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-#
-# Authors: Nathan Binkert
-#          Rick Strong
-#          Andreas Hansson
 
 import sys
 
+from m5.SimObject import *
 from m5.defines import buildEnv
 from m5.params import *
 from m5.proxy import *
+from m5.util.fdthelper import *
 
-from Bus import CoherentBus
-from InstTracer import InstTracer
-from ExeTracer import ExeTracer
-from MemObject import MemObject
+from m5.objects.ClockedObject import ClockedObject
+from m5.objects.XBar import L2XBar
+from m5.objects.InstTracer import InstTracer
+from m5.objects.CPUTracers import ExeTracer
+from m5.objects.SubSystem import SubSystem
+from m5.objects.ClockDomain import *
+from m5.objects.Platform import Platform
+from m5.objects.ResetPort import ResetResponsePort
 
 default_tracer = ExeTracer()
 
-if buildEnv['TARGET_ISA'] == 'alpha':
-    from AlphaTLB import AlphaDTB, AlphaITB
-    from AlphaInterrupts import AlphaInterrupts
-elif buildEnv['TARGET_ISA'] == 'sparc':
-    from SparcTLB import SparcTLB
-    from SparcInterrupts import SparcInterrupts
-elif buildEnv['TARGET_ISA'] == 'x86':
-    from X86TLB import X86TLB
-    from X86LocalApic import X86LocalApic
-elif buildEnv['TARGET_ISA'] == 'mips':
-    from MipsTLB import MipsTLB
-    from MipsInterrupts import MipsInterrupts
-elif buildEnv['TARGET_ISA'] == 'arm':
-    from ArmTLB import ArmTLB
-    from ArmInterrupts import ArmInterrupts
-elif buildEnv['TARGET_ISA'] == 'power':
-    from PowerTLB import PowerTLB
-    from PowerInterrupts import PowerInterrupts
 
-class BaseCPU(MemObject):
-    type = 'BaseCPU'
+class BaseCPU(ClockedObject):
+    type = "BaseCPU"
     abstract = True
+    cxx_header = "cpu/base.hh"
+    cxx_class = "gem5::BaseCPU"
+
+    cxx_exports = [
+        PyBindMethod("switchOut"),
+        PyBindMethod("takeOverFrom"),
+        PyBindMethod("switchedOut"),
+        PyBindMethod("flushTLBs"),
+        PyBindMethod("totalInsts"),
+        PyBindMethod("scheduleInstStop"),
+        PyBindMethod("getCurrentInstCount"),
+        PyBindMethod("scheduleSimpointsInstStop"),
+        PyBindMethod("scheduleInstStopAnyThread"),
+    ]
 
     @classmethod
-    def export_method_cxx_predecls(cls, code):
-        code('#include "cpu/base.hh"')
-
+    def memory_mode(cls):
+        """Which memory mode does this CPU require?"""
+        return "invalid"
 
     @classmethod
-    def export_methods(cls, code):
-        code('''
-    void switchOut();
-    void takeOverFrom(BaseCPU *cpu);
-''')
+    def require_caches(cls):
+        """Does the CPU model require caches?
+
+        Some CPU models might make assumptions that require them to
+        have caches.
+        """
+        return False
+
+    @classmethod
+    def support_take_over(cls):
+        """Does the CPU model support CPU takeOverFrom?"""
+        return False
 
     def takeOverFrom(self, old_cpu):
         self._ccObject.takeOverFrom(old_cpu._ccObject)
 
-
     system = Param.System(Parent.any, "system object")
     cpu_id = Param.Int(-1, "CPU identifier")
+    socket_id = Param.Unsigned(0, "Physical Socket identifier")
     numThreads = Param.Unsigned(1, "number of HW thread contexts")
+    pwr_gating_latency = Param.Cycles(
+        300,
+        "Latency to enter power gating state when all contexts are suspended",
+    )
+
+    power_gating_on_idle = Param.Bool(
+        False,
+        "Control whether the core goes "
+        "to the OFF power state after all thread are disabled for "
+        "pwr_gating_latency cycles",
+    )
 
     function_trace = Param.Bool(False, "Enable function trace")
     function_trace_start = Param.Tick(0, "Tick to start function trace")
 
     checker = Param.BaseCPU(NULL, "checker CPU")
 
-    do_checkpoint_insts = Param.Bool(True,
-        "enable checkpoint pseudo instructions")
-    do_statistics_insts = Param.Bool(True,
-        "enable statistics pseudo instructions")
+    syscallRetryLatency = Param.Cycles(10000, "Cycles to wait until retry")
 
-    profile = Param.Latency('0ns', "trace the kernel stack")
-    do_quiesce = Param.Bool(True, "enable quiesce instructions")
+    do_checkpoint_insts = Param.Bool(
+        True, "enable checkpoint pseudo instructions"
+    )
+    do_statistics_insts = Param.Bool(
+        True, "enable statistics pseudo instructions"
+    )
 
     workload = VectorParam.Process([], "processes to run")
 
-    #vcpu = Param.Bool(False, "if this is a vcpu")
-    #vcpu_hyperperiod = Param.Tick(10000, "")
-    #vcpu_start_tick = Param.Tick(0, "when should this vcpu start processing")
-    #vcpu_stop_tick = Param.Tick(10000, "when should this vcpu stop processing and schedule next event in next start")
+    mmu = Param.BaseMMU(NULL, "CPU memory management unit")
+    interrupts = VectorParam.BaseInterrupts([], "Interrupt Controller")
+    isa = VectorParam.BaseISA([], "ISA instance")
+    decoder = VectorParam.InstDecoder([], "Decoder instance")
 
-    if buildEnv['TARGET_ISA'] == 'sparc':
-        dtb = Param.SparcTLB(SparcTLB(), "Data TLB")
-        itb = Param.SparcTLB(SparcTLB(), "Instruction TLB")
-        interrupts = Param.SparcInterrupts(
-                NULL, "Interrupt Controller")
-    elif buildEnv['TARGET_ISA'] == 'alpha':
-        dtb = Param.AlphaTLB(AlphaDTB(), "Data TLB")
-        itb = Param.AlphaTLB(AlphaITB(), "Instruction TLB")
-        interrupts = Param.AlphaInterrupts(
-                NULL, "Interrupt Controller")
-    elif buildEnv['TARGET_ISA'] == 'x86':
-        dtb = Param.X86TLB(X86TLB(), "Data TLB")
-        itb = Param.X86TLB(X86TLB(), "Instruction TLB")
-        interrupts = Param.X86LocalApic(NULL, "Interrupt Controller")
-    elif buildEnv['TARGET_ISA'] == 'mips':
-        dtb = Param.MipsTLB(MipsTLB(), "Data TLB")
-        itb = Param.MipsTLB(MipsTLB(), "Instruction TLB")
-        interrupts = Param.MipsInterrupts(
-                NULL, "Interrupt Controller")
-    elif buildEnv['TARGET_ISA'] == 'arm':
-        dtb = Param.ArmTLB(ArmTLB(), "Data TLB")
-        itb = Param.ArmTLB(ArmTLB(), "Instruction TLB")
-        interrupts = Param.ArmInterrupts(
-                NULL, "Interrupt Controller")
-    elif buildEnv['TARGET_ISA'] == 'power':
-        UnifiedTLB = Param.Bool(True, "Is this a Unified TLB?")
-        dtb = Param.PowerTLB(PowerTLB(), "Data TLB")
-        itb = Param.PowerTLB(PowerTLB(), "Instruction TLB")
-        interrupts = Param.PowerInterrupts(
-                NULL, "Interrupt Controller")
-    else:
-        print "Don't know what TLB to use for ISA %s" % \
-            buildEnv['TARGET_ISA']
-        sys.exit(1)
+    max_insts_all_threads = Param.Counter(
+        0, "terminate when all threads have reached this inst count"
+    )
+    max_insts_any_thread = Param.Counter(
+        0, "terminate when any thread reaches this inst count"
+    )
+    simpoint_start_insts = VectorParam.Counter(
+        [], "starting instruction counts of simpoints"
+    )
+    progress_interval = Param.Frequency(
+        "0Hz", "frequency to print out the progress message"
+    )
 
-    max_insts_all_threads = Param.Counter(0,
-        "terminate when all threads have reached this inst count")
-    max_insts_any_thread = Param.Counter(0,
-        "terminate when any thread reaches this inst count")
-    max_loads_all_threads = Param.Counter(0,
-        "terminate when all threads have reached this load count")
-    max_loads_any_thread = Param.Counter(0,
-        "terminate when any thread reaches this load count")
-    progress_interval = Param.Frequency('0Hz',
-        "frequency to print out the progress message")
+    switched_out = Param.Bool(
+        False,
+        "Leave the CPU switched out after startup (used when switching "
+        "between CPU models)",
+    )
 
-    defer_registration = Param.Bool(False,
-        "defer registration with system (for sampling)")
+    model_reset = ResetResponsePort("Generic reset for the CPU")
 
     tracer = Param.InstTracer(default_tracer, "Instruction tracer")
 
-    icache_port = MasterPort("Instruction Port")
-    dcache_port = MasterPort("Data Port")
-    _cached_ports = ['icache_port', 'dcache_port']
+    icache_port = RequestPort("Instruction Port")
+    dcache_port = RequestPort("Data Port")
+    _cached_ports = ["icache_port", "dcache_port"]
 
-    if buildEnv['TARGET_ISA'] in ['x86', 'arm']:
-        _cached_ports += ["itb.walker.port", "dtb.walker.port"]
-
-    _uncached_slave_ports = []
-    _uncached_master_ports = []
-    if buildEnv['TARGET_ISA'] == 'x86':
-        _uncached_slave_ports += ["interrupts.pio", "interrupts.int_slave"]
-        _uncached_master_ports += ["interrupts.int_master"]
+    _uncached_interrupt_response_ports = []
+    _uncached_interrupt_request_ports = []
 
     def createInterruptController(self):
-        if buildEnv['TARGET_ISA'] == 'sparc':
-            self.interrupts = SparcInterrupts()
-        elif buildEnv['TARGET_ISA'] == 'alpha':
-            self.interrupts = AlphaInterrupts()
-        elif buildEnv['TARGET_ISA'] == 'x86':
-            _localApic = X86LocalApic(pio_addr=0x2000000000000000)
-            self.interrupts = _localApic
-        elif buildEnv['TARGET_ISA'] == 'mips':
-            self.interrupts = MipsInterrupts()
-        elif buildEnv['TARGET_ISA'] == 'arm':
-            self.interrupts = ArmInterrupts()
-        elif buildEnv['TARGET_ISA'] == 'power':
-            self.interrupts = PowerInterrupts()
-        else:
-            print "Don't know what Interrupt Controller to use for ISA %s" % \
-                buildEnv['TARGET_ISA']
-            sys.exit(1)
+        self.interrupts = [
+            self.ArchInterrupts() for i in range(self.numThreads)
+        ]
 
-    def connectCachedPorts(self, bus):
+    def connectCachedPorts(self, in_ports):
         for p in self._cached_ports:
-            exec('self.%s = bus.slave' % p)
+            exec(f"self.{p} = in_ports")
 
-    def connectUncachedPorts(self, bus):
-        for p in self._uncached_slave_ports:
-            exec('self.%s = bus.master' % p)
-        for p in self._uncached_master_ports:
-            exec('self.%s = bus.slave' % p)
+    def connectUncachedPorts(self, in_ports, out_ports):
+        for p in self._uncached_interrupt_response_ports:
+            exec(f"self.{p} = out_ports")
+        for p in self._uncached_interrupt_request_ports:
+            exec(f"self.{p} = in_ports")
 
-    def connectAllPorts(self, cached_bus, uncached_bus = None):
-        self.connectCachedPorts(cached_bus)
-        if not uncached_bus:
-            uncached_bus = cached_bus
-        self.connectUncachedPorts(uncached_bus)
+    def connectAllPorts(self, cached_in, uncached_in, uncached_out):
+        self.connectCachedPorts(cached_in)
+        self.connectUncachedPorts(uncached_in, uncached_out)
 
-    def addPrivateSplitL1Caches(self, ic, dc, iwc = None, dwc = None):
+    def connectBus(self, bus):
+        self.connectAllPorts(
+            bus.cpu_side_ports, bus.cpu_side_ports, bus.mem_side_ports
+        )
+
+    def addPrivateSplitL1Caches(self, ic, dc, iwc=None, dwc=None):
         self.icache = ic
         self.dcache = dc
         self.icache_port = ic.cpu_side
         self.dcache_port = dc.cpu_side
-        self._cached_ports = ['icache.mem_side', 'dcache.mem_side']
-        if buildEnv['TARGET_ISA'] in ['x86', 'arm']:
-            if iwc and dwc:
-                self.itb_walker_cache = iwc
-                self.dtb_walker_cache = dwc
-                self.itb.walker.port = iwc.cpu_side
-                self.dtb.walker.port = dwc.cpu_side
-                self._cached_ports += ["itb_walker_cache.mem_side", \
-                                       "dtb_walker_cache.mem_side"]
-            else:
-                self._cached_ports += ["itb.walker.port", "dtb.walker.port"]
+        self._cached_ports = ["icache.mem_side", "dcache.mem_side"]
+        if iwc and dwc:
+            self.itb_walker_cache = iwc
+            self.dtb_walker_cache = dwc
+            self.mmu.connectWalkerPorts(iwc.cpu_side, dwc.cpu_side)
+            self._cached_ports += [
+                "itb_walker_cache.mem_side",
+                "dtb_walker_cache.mem_side",
+            ]
+        else:
+            self._cached_ports += self.ArchMMU.walkerPorts()
 
-            # Checker doesn't need its own tlb caches because it does
-            # functional accesses only
-            if self.checker != NULL:
-                self._cached_ports += ["checker.itb.walker.port", \
-                                       "checker.dtb.walker.port"]
+        # Checker doesn't need its own tlb caches because it does
+        # functional accesses only
+        if self.checker != NULL:
+            self._cached_ports += [
+                "checker." + port for port in self.ArchMMU.walkerPorts()
+            ]
 
-    def addTwoLevelCacheHierarchy(self, ic, dc, l2c, iwc = None, dwc = None):
+    def addTwoLevelCacheHierarchy(
+        self, ic, dc, l2c, iwc=None, dwc=None, xbar=None
+    ):
         self.addPrivateSplitL1Caches(ic, dc, iwc, dwc)
-        # Override the default bus clock of 1 GHz and uses the CPU
-        # clock for the L1-to-L2 bus, and also set a width of 32 bytes
-        # (256-bits), which is four times that of the default bus.
-        self.toL2Bus = CoherentBus(clock = Parent.clock, width = 32)
-        self.connectCachedPorts(self.toL2Bus)
+        self.toL2Bus = xbar if xbar else L2XBar()
+        self.connectCachedPorts(self.toL2Bus.cpu_side_ports)
         self.l2cache = l2c
-        self.toL2Bus.master = self.l2cache.cpu_side
-        self._cached_ports = ['l2cache.mem_side']
+        self.toL2Bus.mem_side_ports = self.l2cache.cpu_side
+        self._cached_ports = ["l2cache.mem_side"]
+
+    def createThreads(self):
+        # If no ISAs have been created, assume that the user wants the
+        # default ISA.
+        if len(self.isa) == 0:
+            self.isa = [self.ArchISA() for i in range(self.numThreads)]
+        else:
+            if len(self.isa) != int(self.numThreads):
+                raise RuntimeError(
+                    "Number of ISA instances doesn't match thread count"
+                )
+        if len(self.decoder) != 0:
+            raise RuntimeError("Decoders should not be set up manually")
+        self.decoder = list([self.ArchDecoder(isa=isa) for isa in self.isa])
+        if self.checker != NULL:
+            self.checker.createThreads()
 
     def addCheckerCpu(self):
         pass
+
+    def createPhandleKey(self, thread):
+        # This method creates a unique key for this cpu as a function of a
+        # certain thread
+        return "CPU-%d-%d-%d" % (self.socket_id, self.cpu_id, thread)
+
+    # Generate simple CPU Device Tree structure
+    def generateDeviceTree(self, state):
+        """Generate cpu nodes for each thread and the corresponding part of the
+        cpu-map node. Note that this implementation does not support clusters
+        of clusters. Note that GEM5 is not compatible with the official way of
+        numbering cores as defined in the Device Tree documentation. Where the
+        cpu_id needs to reset to 0 for each cluster by specification, GEM5
+        expects the cpu_id to be globally unique and incremental. This
+        generated node adheres the GEM5 way of doing things."""
+        if bool(self.switched_out):
+            return
+
+        cpus_node = FdtNode("cpus")
+        cpus_node.append(state.CPUCellsProperty())
+        # Special size override of 0
+        cpus_node.append(FdtPropertyWords("#size-cells", [0]))
+
+        # Generate cpu nodes
+        for i in range(int(self.numThreads)):
+            reg = (int(self.socket_id) << 8) + int(self.cpu_id) + i
+            node = FdtNode(f"cpu@{reg:x}")
+            node.append(FdtPropertyStrings("device_type", "cpu"))
+            node.appendCompatible(["gem5,arm-cpu"])
+            node.append(FdtPropertyWords("reg", state.CPUAddrCells(reg)))
+            platform, found = self.system.unproxy(self).find_any(Platform)
+            if found:
+                platform.annotateCpuDeviceNode(node, state)
+            else:
+                warn(
+                    "Platform not found for device tree generation; "
+                    "system or multiple CPUs may not start"
+                )
+
+            freq = int(self.clk_domain.unproxy(self).clock[0].frequency)
+            node.append(FdtPropertyWords("clock-frequency", freq))
+
+            # Unique key for this CPU
+            phandle_key = self.createPhandleKey(i)
+            node.appendPhandle(phandle_key)
+            cpus_node.append(node)
+
+        yield cpus_node
+
+        # Generate nodes from the BaseCPU children (hence under the root node,
+        # and don't add them as subnode). Please note: this is mainly needed
+        # for the ISA class, to generate the PMU entry in the DTB.
+        for child_node in self.recurseDeviceTree(state):
+            yield child_node
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.power_state.possible_states = ["ON", "CLK_GATED", "OFF"]
+
+        self._cached_ports = self._cached_ports + self.ArchMMU.walkerPorts()
+
+        # Practically speaking, these ports will exist on the x86 interrupt
+        # controller class.
+        if "pio" in self.ArchInterrupts._ports:
+            self._uncached_interrupt_response_ports = (
+                self._uncached_interrupt_response_ports + ["interrupts[0].pio"]
+            )
+        if "int_responder" in self.ArchInterrupts._ports:
+            self._uncached_interrupt_response_ports = (
+                self._uncached_interrupt_response_ports
+                + ["interrupts[0].int_responder"]
+            )
+        if "int_requestor" in self.ArchInterrupts._ports:
+            self._uncached_interrupt_request_ports = (
+                self._uncached_interrupt_request_ports
+                + ["interrupts[0].int_requestor"]
+            )

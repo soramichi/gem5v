@@ -32,10 +32,14 @@
 # THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-#
-# Authors: Gabe Black
 
-microcode = '''
-# FABS
-# FCHS
-'''
+microcode = """
+
+def macroop FABS {
+    absfp st(0), st(0), SetStatus=True
+};
+
+def macroop FCHS {
+    chsfp st(0), st(0), SetStatus=True
+};
+"""

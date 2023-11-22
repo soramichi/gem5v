@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2012 ARM Limited
+ * Copyright (c) 2011-2013, 2015 ARM Limited
  * All rights reserved
  *
  * The license below extends only to copyright in the software and shall
@@ -36,175 +36,186 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * Authors: Ali Saidi
- *          Steve Reinhardt
- *          Andreas Hansson
  */
 
 /**
  * @file
- * Implementation of a memory-mapped bus bridge that connects a master
- * and a slave through a request and response queue.
+ * Implementation of a memory-mapped bridge that connects a requestor
+ * and a responder through a request and response queue.
  */
+
+#include "mem/bridge.hh"
 
 #include "base/trace.hh"
 #include "debug/Bridge.hh"
-#include "mem/bridge.hh"
 #include "params/Bridge.hh"
 
-Bridge::BridgeSlavePort::BridgeSlavePort(const std::string& _name,
+namespace gem5
+{
+
+Bridge::BridgeResponsePort::BridgeResponsePort(const std::string& _name,
                                          Bridge& _bridge,
-                                         BridgeMasterPort& _masterPort,
+                                         BridgeRequestPort& _memSidePort,
                                          Cycles _delay, int _resp_limit,
                                          std::vector<AddrRange> _ranges)
-    : SlavePort(_name, &_bridge), bridge(_bridge), masterPort(_masterPort),
-      delay(_delay), ranges(_ranges.begin(), _ranges.end()),
-      outstandingResponses(0), retryReq(false),
-      respQueueLimit(_resp_limit), sendEvent(*this)
+    : ResponsePort(_name), bridge(_bridge),
+      memSidePort(_memSidePort), delay(_delay),
+      ranges(_ranges.begin(), _ranges.end()),
+      outstandingResponses(0), retryReq(false), respQueueLimit(_resp_limit),
+      sendEvent([this]{ trySendTiming(); }, _name)
 {
 }
 
-Bridge::BridgeMasterPort::BridgeMasterPort(const std::string& _name,
+Bridge::BridgeRequestPort::BridgeRequestPort(const std::string& _name,
                                            Bridge& _bridge,
-                                           BridgeSlavePort& _slavePort,
+                                           BridgeResponsePort& _cpuSidePort,
                                            Cycles _delay, int _req_limit)
-    : MasterPort(_name, &_bridge), bridge(_bridge), slavePort(_slavePort),
-      delay(_delay), reqQueueLimit(_req_limit), sendEvent(*this)
+    : RequestPort(_name), bridge(_bridge),
+      cpuSidePort(_cpuSidePort),
+      delay(_delay), reqQueueLimit(_req_limit),
+      sendEvent([this]{ trySendTiming(); }, _name)
 {
 }
 
-Bridge::Bridge(Params *p)
-    : MemObject(p),
-      slavePort(p->name + ".slave", *this, masterPort,
-                ticksToCycles(p->delay), p->resp_size, p->ranges),
-      masterPort(p->name + ".master", *this, slavePort,
-                 ticksToCycles(p->delay), p->req_size)
+Bridge::Bridge(const Params &p)
+    : ClockedObject(p),
+      cpuSidePort(p.name + ".cpu_side_port", *this, memSidePort,
+                ticksToCycles(p.delay), p.resp_size, p.ranges),
+      memSidePort(p.name + ".mem_side_port", *this, cpuSidePort,
+                 ticksToCycles(p.delay), p.req_size)
 {
 }
 
-BaseMasterPort&
-Bridge::getMasterPort(const std::string &if_name, PortID idx)
+Port &
+Bridge::getPort(const std::string &if_name, PortID idx)
 {
-    if (if_name == "master")
-        return masterPort;
+    if (if_name == "mem_side_port")
+        return memSidePort;
+    else if (if_name == "cpu_side_port")
+        return cpuSidePort;
     else
         // pass it along to our super class
-        return MemObject::getMasterPort(if_name, idx);
-}
-
-BaseSlavePort&
-Bridge::getSlavePort(const std::string &if_name, PortID idx)
-{
-    if (if_name == "slave")
-        return slavePort;
-    else
-        // pass it along to our super class
-        return MemObject::getSlavePort(if_name, idx);
+        return ClockedObject::getPort(if_name, idx);
 }
 
 void
 Bridge::init()
 {
     // make sure both sides are connected and have the same block size
-    if (!slavePort.isConnected() || !masterPort.isConnected())
-        fatal("Both ports of bus bridge are not connected to a bus.\n");
+    if (!cpuSidePort.isConnected() || !memSidePort.isConnected())
+        fatal("Both ports of a bridge must be connected.\n");
 
-    if (slavePort.peerBlockSize() != masterPort.peerBlockSize())
-        fatal("Slave port size %d, master port size %d \n " \
-              "Busses don't have the same block size... Not supported.\n",
-              slavePort.peerBlockSize(), masterPort.peerBlockSize());
-
-    // notify the master side  of our address ranges
-    slavePort.sendRangeChange();
+    // notify the request side  of our address ranges
+    cpuSidePort.sendRangeChange();
 }
 
 bool
-Bridge::BridgeSlavePort::respQueueFull()
+Bridge::BridgeResponsePort::respQueueFull() const
 {
     return outstandingResponses == respQueueLimit;
 }
 
 bool
-Bridge::BridgeMasterPort::reqQueueFull()
+Bridge::BridgeRequestPort::reqQueueFull() const
 {
     return transmitList.size() == reqQueueLimit;
 }
 
 bool
-Bridge::BridgeMasterPort::recvTimingResp(PacketPtr pkt)
+Bridge::BridgeRequestPort::recvTimingResp(PacketPtr pkt)
 {
-    // all checks are done when the request is accepted on the slave
+    // all checks are done when the request is accepted on the response
     // side, so we are guaranteed to have space for the response
     DPRINTF(Bridge, "recvTimingResp: %s addr 0x%x\n",
             pkt->cmdString(), pkt->getAddr());
 
     DPRINTF(Bridge, "Request queue size: %d\n", transmitList.size());
 
-    slavePort.schedTimingResp(pkt, bridge.clockEdge(delay));
+    // technically the packet only reaches us after the header delay,
+    // and typically we also need to deserialise any payload (unless
+    // the two sides of the bridge are synchronous)
+    Tick receive_delay = pkt->headerDelay + pkt->payloadDelay;
+    pkt->headerDelay = pkt->payloadDelay = 0;
+
+    cpuSidePort.schedTimingResp(pkt, bridge.clockEdge(delay) +
+                              receive_delay);
 
     return true;
 }
 
 bool
-Bridge::BridgeSlavePort::recvTimingReq(PacketPtr pkt)
+Bridge::BridgeResponsePort::recvTimingReq(PacketPtr pkt)
 {
     DPRINTF(Bridge, "recvTimingReq: %s addr 0x%x\n",
             pkt->cmdString(), pkt->getAddr());
 
-    // ensure we do not have something waiting to retry
-    if(retryReq)
+    panic_if(pkt->cacheResponding(), "Should not see packets where cache "
+             "is responding");
+
+    // we should not get a new request after committing to retry the
+    // current one, but unfortunately the CPU violates this rule, so
+    // simply ignore it for now
+    if (retryReq)
         return false;
 
     DPRINTF(Bridge, "Response queue size: %d outresp: %d\n",
             transmitList.size(), outstandingResponses);
 
-    if (masterPort.reqQueueFull()) {
+    // if the request queue is full then there is no hope
+    if (memSidePort.reqQueueFull()) {
         DPRINTF(Bridge, "Request queue full\n");
         retryReq = true;
-    } else if (pkt->needsResponse()) {
-        if (respQueueFull()) {
-            DPRINTF(Bridge, "Response queue full\n");
-            retryReq = true;
-        } else {
-            DPRINTF(Bridge, "Reserving space for response\n");
-            assert(outstandingResponses != respQueueLimit);
-            ++outstandingResponses;
-            retryReq = false;
-            masterPort.schedTimingReq(pkt, bridge.clockEdge(delay));
+    } else {
+        // look at the response queue if we expect to see a response
+        bool expects_response = pkt->needsResponse();
+        if (expects_response) {
+            if (respQueueFull()) {
+                DPRINTF(Bridge, "Response queue full\n");
+                retryReq = true;
+            } else {
+                // ok to send the request with space for the response
+                DPRINTF(Bridge, "Reserving space for response\n");
+                assert(outstandingResponses != respQueueLimit);
+                ++outstandingResponses;
+
+                // no need to set retryReq to false as this is already the
+                // case
+            }
+        }
+
+        if (!retryReq) {
+            // technically the packet only reaches us after the header
+            // delay, and typically we also need to deserialise any
+            // payload (unless the two sides of the bridge are
+            // synchronous)
+            Tick receive_delay = pkt->headerDelay + pkt->payloadDelay;
+            pkt->headerDelay = pkt->payloadDelay = 0;
+
+            memSidePort.schedTimingReq(pkt, bridge.clockEdge(delay) +
+                                      receive_delay);
         }
     }
 
     // remember that we are now stalling a packet and that we have to
-    // tell the sending master to retry once space becomes available,
+    // tell the sending requestor to retry once space becomes available,
     // we make no distinction whether the stalling is due to the
     // request queue or response queue being full
     return !retryReq;
 }
 
 void
-Bridge::BridgeSlavePort::retryStalledReq()
+Bridge::BridgeResponsePort::retryStalledReq()
 {
     if (retryReq) {
         DPRINTF(Bridge, "Request waiting for retry, now retrying\n");
         retryReq = false;
-        sendRetry();
+        sendRetryReq();
     }
 }
 
 void
-Bridge::BridgeMasterPort::schedTimingReq(PacketPtr pkt, Tick when)
+Bridge::BridgeRequestPort::schedTimingReq(PacketPtr pkt, Tick when)
 {
-    // If we expect to see a response, we need to restore the source
-    // and destination field that is potentially changed by a second
-    // bus
-    if (!pkt->memInhibitAsserted() && pkt->needsResponse()) {
-        // Update the sender state so we can deal with the response
-        // appropriately
-        RequestState *req_state = new RequestState(pkt);
-        pkt->senderState = req_state;
-    }
-
     // If we're about to put this packet at the head of the queue, we
     // need to schedule an event to do the transmit.  Otherwise there
     // should already be an event scheduled for sending the head
@@ -215,28 +226,13 @@ Bridge::BridgeMasterPort::schedTimingReq(PacketPtr pkt, Tick when)
 
     assert(transmitList.size() != reqQueueLimit);
 
-    transmitList.push_back(DeferredPacket(pkt, when));
+    transmitList.emplace_back(pkt, when);
 }
 
 
 void
-Bridge::BridgeSlavePort::schedTimingResp(PacketPtr pkt, Tick when)
+Bridge::BridgeResponsePort::schedTimingResp(PacketPtr pkt, Tick when)
 {
-    // This is a response for a request we forwarded earlier.  The
-    // corresponding request state should be stored in the packet's
-    // senderState field.
-    RequestState *req_state = dynamic_cast<RequestState*>(pkt->senderState);
-    assert(req_state != NULL);
-    // set up new packet dest & senderState based on values saved
-    // from original request
-    req_state->fixResponse(pkt);
-    delete req_state;
-
-    // the bridge assumes that at least one bus has set the
-    // destination field of the packet
-    assert(pkt->isDestValid());
-    DPRINTF(Bridge, "response, new dest %d\n", pkt->getDest());
-
     // If we're about to put this packet at the head of the queue, we
     // need to schedule an event to do the transmit.  Otherwise there
     // should already be an event scheduled for sending the head
@@ -245,11 +241,11 @@ Bridge::BridgeSlavePort::schedTimingResp(PacketPtr pkt, Tick when)
         bridge.schedule(sendEvent, when);
     }
 
-    transmitList.push_back(DeferredPacket(pkt, when));
+    transmitList.emplace_back(pkt, when);
 }
 
 void
-Bridge::BridgeMasterPort::trySendTiming()
+Bridge::BridgeRequestPort::trySendTiming()
 {
     assert(!transmitList.empty());
 
@@ -269,17 +265,17 @@ Bridge::BridgeMasterPort::trySendTiming()
 
         // If there are more packets to send, schedule event to try again.
         if (!transmitList.empty()) {
-            req = transmitList.front();
+            DeferredPacket next_req = transmitList.front();
             DPRINTF(Bridge, "Scheduling next send\n");
-            bridge.schedule(sendEvent, std::max(req.tick,
-                                                bridge.nextCycle()));
+            bridge.schedule(sendEvent, std::max(next_req.tick,
+                                                bridge.clockEdge()));
         }
 
         // if we have stalled a request due to a full request queue,
         // then send a retry at this point, also note that if the
         // request we stalled was waiting for the response queue
         // rather than the request queue we might stall it again
-        slavePort.retryStalledReq();
+        cpuSidePort.retryStalledReq();
     }
 
     // if the send failed, then we try again once we receive a retry,
@@ -287,7 +283,7 @@ Bridge::BridgeMasterPort::trySendTiming()
 }
 
 void
-Bridge::BridgeSlavePort::trySendTiming()
+Bridge::BridgeResponsePort::trySendTiming()
 {
     assert(!transmitList.empty());
 
@@ -310,19 +306,19 @@ Bridge::BridgeSlavePort::trySendTiming()
 
         // If there are more packets to send, schedule event to try again.
         if (!transmitList.empty()) {
-            resp = transmitList.front();
+            DeferredPacket next_resp = transmitList.front();
             DPRINTF(Bridge, "Scheduling next send\n");
-            bridge.schedule(sendEvent, std::max(resp.tick,
-                                                bridge.nextCycle()));
+            bridge.schedule(sendEvent, std::max(next_resp.tick,
+                                                bridge.clockEdge()));
         }
 
         // if there is space in the request queue and we were stalling
         // a request, it will definitely be possible to accept it now
         // since there is guaranteed space in the response queue
-        if (!masterPort.reqQueueFull() && retryReq) {
+        if (!memSidePort.reqQueueFull() && retryReq) {
             DPRINTF(Bridge, "Request waiting for retry, now retrying\n");
             retryReq = false;
-            sendRetry();
+            sendRetryReq();
         }
     }
 
@@ -331,65 +327,73 @@ Bridge::BridgeSlavePort::trySendTiming()
 }
 
 void
-Bridge::BridgeMasterPort::recvRetry()
+Bridge::BridgeRequestPort::recvReqRetry()
 {
-    Tick nextReady = transmitList.front().tick;
-    if (nextReady <= curTick())
-        trySendTiming();
-    else
-        bridge.schedule(sendEvent, nextReady);
+    trySendTiming();
 }
 
 void
-Bridge::BridgeSlavePort::recvRetry()
+Bridge::BridgeResponsePort::recvRespRetry()
 {
-    Tick nextReady = transmitList.front().tick;
-    if (nextReady <= curTick())
-        trySendTiming();
-    else
-        bridge.schedule(sendEvent, nextReady);
+    trySendTiming();
 }
 
 Tick
-Bridge::BridgeSlavePort::recvAtomic(PacketPtr pkt)
+Bridge::BridgeResponsePort::recvAtomic(PacketPtr pkt)
 {
-    return delay * bridge.clockPeriod() + masterPort.sendAtomic(pkt);
+    panic_if(pkt->cacheResponding(), "Should not see packets where cache "
+             "is responding");
+
+    return delay * bridge.clockPeriod() + memSidePort.sendAtomic(pkt);
+}
+
+Tick
+Bridge::BridgeResponsePort::recvAtomicBackdoor(
+    PacketPtr pkt, MemBackdoorPtr &backdoor)
+{
+    return delay * bridge.clockPeriod() + memSidePort.sendAtomicBackdoor(
+        pkt, backdoor);
 }
 
 void
-Bridge::BridgeSlavePort::recvFunctional(PacketPtr pkt)
+Bridge::BridgeResponsePort::recvFunctional(PacketPtr pkt)
 {
-    std::list<DeferredPacket>::iterator i;
-
     pkt->pushLabel(name());
 
     // check the response queue
-    for (i = transmitList.begin();  i != transmitList.end(); ++i) {
-        if (pkt->checkFunctional((*i).pkt)) {
+    for (auto i = transmitList.begin();  i != transmitList.end(); ++i) {
+        if (pkt->trySatisfyFunctional((*i).pkt)) {
             pkt->makeResponse();
             return;
         }
     }
 
-    // also check the master port's request queue
-    if (masterPort.checkFunctional(pkt)) {
+    // also check the request port's request queue
+    if (memSidePort.trySatisfyFunctional(pkt)) {
         return;
     }
 
     pkt->popLabel();
 
     // fall through if pkt still not satisfied
-    masterPort.sendFunctional(pkt);
+    memSidePort.sendFunctional(pkt);
+}
+
+void
+Bridge::BridgeResponsePort::recvMemBackdoorReq(
+    const MemBackdoorReq &req, MemBackdoorPtr &backdoor)
+{
+    memSidePort.sendMemBackdoorReq(req, backdoor);
 }
 
 bool
-Bridge::BridgeMasterPort::checkFunctional(PacketPtr pkt)
+Bridge::BridgeRequestPort::trySatisfyFunctional(PacketPtr pkt)
 {
     bool found = false;
-    std::list<DeferredPacket>::iterator i = transmitList.begin();
+    auto i = transmitList.begin();
 
-    while(i != transmitList.end() && !found) {
-        if (pkt->checkFunctional((*i).pkt)) {
+    while (i != transmitList.end() && !found) {
+        if (pkt->trySatisfyFunctional((*i).pkt)) {
             pkt->makeResponse();
             found = true;
         }
@@ -400,13 +404,9 @@ Bridge::BridgeMasterPort::checkFunctional(PacketPtr pkt)
 }
 
 AddrRangeList
-Bridge::BridgeSlavePort::getAddrRanges() const
+Bridge::BridgeResponsePort::getAddrRanges() const
 {
     return ranges;
 }
 
-Bridge *
-BridgeParams::create()
-{
-    return new Bridge(this);
-}
+} // namespace gem5

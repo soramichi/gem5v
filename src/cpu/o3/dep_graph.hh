@@ -1,4 +1,16 @@
 /*
+ * Copyright (c) 2012 ARM Limited
+ * All rights reserved
+ *
+ * The license below extends only to copyright in the software and shall
+ * not be construed as granting a license to any other intellectual
+ * property including but not limited to intellectual property relating
+ * to a hardware implementation of the functionality of the software
+ * licensed hereunder.  You may use the software subject to the license
+ * terms below provided that you ensure that this notice is replicated
+ * unmodified and in its entirety in all distributions of the software,
+ * modified or unmodified, in source code or in binary form.
+ *
  * Copyright (c) 2006 The Regents of The University of Michigan
  * All rights reserved.
  *
@@ -24,14 +36,18 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * Authors: Kevin Lim
  */
 
 #ifndef __CPU_O3_DEP_GRAPH_HH__
 #define __CPU_O3_DEP_GRAPH_HH__
 
 #include "cpu/o3/comm.hh"
+
+namespace gem5
+{
+
+namespace o3
+{
 
 /** Node in a linked list. */
 template <class DynInstPtr>
@@ -77,24 +93,27 @@ class DependencyGraph
     void reset();
 
     /** Inserts an instruction to be dependent on the given index. */
-    void insert(PhysRegIndex idx, DynInstPtr &new_inst);
+    void insert(RegIndex idx, const DynInstPtr &new_inst);
 
     /** Sets the producing instruction of a given register. */
-    void setInst(PhysRegIndex idx, DynInstPtr &new_inst)
+    void setInst(RegIndex idx, const DynInstPtr &new_inst)
     { dependGraph[idx].inst = new_inst; }
 
     /** Clears the producing instruction. */
-    void clearInst(PhysRegIndex idx)
+    void clearInst(RegIndex idx)
     { dependGraph[idx].inst = NULL; }
 
     /** Removes an instruction from a single linked list. */
-    void remove(PhysRegIndex idx, DynInstPtr &inst_to_remove);
+    void remove(RegIndex idx, const DynInstPtr &inst_to_remove);
 
     /** Removes and returns the newest dependent of a specific register. */
-    DynInstPtr pop(PhysRegIndex idx);
+    DynInstPtr pop(RegIndex idx);
+
+    /** Checks if the entire dependency graph is empty. */
+    bool empty() const;
 
     /** Checks if there are any dependents on a specific register. */
-    bool empty(PhysRegIndex idx) { return !dependGraph[idx].next; }
+    bool empty(RegIndex idx) const { return !dependGraph[idx].next; }
 
     /** Debugging function to dump out the dependency graph.
      */
@@ -107,7 +126,7 @@ class DependencyGraph
      *  instructions in flight that are dependent upon r34 will be
      *  in the linked list of dependGraph[34].
      */
-    DepEntry *dependGraph;
+    std::vector<DepEntry> dependGraph;
 
     /** Number of linked lists; identical to the number of registers. */
     int numEntries;
@@ -125,7 +144,6 @@ class DependencyGraph
 template <class DynInstPtr>
 DependencyGraph<DynInstPtr>::~DependencyGraph()
 {
-    delete [] dependGraph;
 }
 
 template <class DynInstPtr>
@@ -133,7 +151,7 @@ void
 DependencyGraph<DynInstPtr>::resize(int num_entries)
 {
     numEntries = num_entries;
-    dependGraph = new DepEntry[numEntries];
+    dependGraph.resize(numEntries);
 }
 
 template <class DynInstPtr>
@@ -167,7 +185,7 @@ DependencyGraph<DynInstPtr>::reset()
 
 template <class DynInstPtr>
 void
-DependencyGraph<DynInstPtr>::insert(PhysRegIndex idx, DynInstPtr &new_inst)
+DependencyGraph<DynInstPtr>::insert(RegIndex idx, const DynInstPtr &new_inst)
 {
     //Add this new, dependent instruction at the head of the dependency
     //chain.
@@ -187,8 +205,8 @@ DependencyGraph<DynInstPtr>::insert(PhysRegIndex idx, DynInstPtr &new_inst)
 
 template <class DynInstPtr>
 void
-DependencyGraph<DynInstPtr>::remove(PhysRegIndex idx,
-                                    DynInstPtr &inst_to_remove)
+DependencyGraph<DynInstPtr>::remove(RegIndex idx,
+                                    const DynInstPtr &inst_to_remove)
 {
     DepEntry *prev = &dependGraph[idx];
     DepEntry *curr = dependGraph[idx].next;
@@ -225,7 +243,7 @@ DependencyGraph<DynInstPtr>::remove(PhysRegIndex idx,
 
 template <class DynInstPtr>
 DynInstPtr
-DependencyGraph<DynInstPtr>::pop(PhysRegIndex idx)
+DependencyGraph<DynInstPtr>::pop(RegIndex idx)
 {
     DepEntry *node;
     node = dependGraph[idx].next;
@@ -238,6 +256,17 @@ DependencyGraph<DynInstPtr>::pop(PhysRegIndex idx)
         delete node;
     }
     return inst;
+}
+
+template <class DynInstPtr>
+bool
+DependencyGraph<DynInstPtr>::empty() const
+{
+    for (int i = 0; i < numEntries; ++i) {
+        if (!empty(i))
+            return false;
+    }
+    return true;
 }
 
 template <class DynInstPtr>
@@ -268,5 +297,8 @@ DependencyGraph<DynInstPtr>::dump()
     }
     cprintf("memAllocCounter: %i\n", memAllocCounter);
 }
+
+} // namespace o3
+} // namespace gem5
 
 #endif // __CPU_O3_DEP_GRAPH_HH__

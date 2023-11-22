@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010 ARM Limited
+ * Copyright (c) 2010-2013, 2016-2022 Arm Limited
  * All rights reserved
  *
  * The license below extends only to copyright in the software and shall
@@ -36,139 +36,263 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * Authors: Ali Saidi
- *          Nathan Binkert
- *          Steve Reinhardt
  */
 
+#include "arch/arm/tlb.hh"
+
+#include <memory>
 #include <string>
 #include <vector>
 
-#include "arch/arm/faults.hh"
-#include "arch/arm/pagetable.hh"
-#include "arch/arm/system.hh"
 #include "arch/arm/table_walker.hh"
-#include "arch/arm/tlb.hh"
+#include "arch/arm/tlbi_op.hh"
 #include "arch/arm/utility.hh"
-#include "base/inifile.hh"
-#include "base/str.hh"
 #include "base/trace.hh"
 #include "cpu/thread_context.hh"
-#include "debug/Checkpoint.hh"
 #include "debug/TLB.hh"
 #include "debug/TLBVerbose.hh"
-#include "mem/page_table.hh"
 #include "params/ArmTLB.hh"
-#include "sim/full_system.hh"
-#include "sim/process.hh"
 
-using namespace std;
+namespace gem5
+{
+
 using namespace ArmISA;
 
-TLB::TLB(const Params *p)
-    : BaseTLB(p), size(p->size) , tableWalker(p->walker),
-    rangeMRU(1), bootUncacheability(false), miscRegValid(false)
+TLB::TLB(const ArmTLBParams &p)
+    : BaseTLB(p), table(new TlbEntry[p.size]), size(p.size),
+      isStage2(p.is_stage2),
+      _walkCache(false),
+      tableWalker(nullptr),
+      stats(*this), rangeMRU(1), vmid(0)
 {
-    table = new TlbEntry[size];
-    memset(table, 0, sizeof(TlbEntry) * size);
+    for (int lvl = LookupLevel::L0;
+         lvl < LookupLevel::Num_ArmLookupLevel; lvl++) {
 
-    tableWalker->setTlb(this);
+        auto it = std::find(
+            p.partial_levels.begin(),
+            p.partial_levels.end(),
+            lvl);
+
+        auto lookup_lvl = static_cast<LookupLevel>(lvl);
+
+        if (it != p.partial_levels.end()) {
+            // A partial entry from of the current LookupLevel can be
+            // cached within the TLB
+            partialLevels[lookup_lvl] = true;
+
+            // Make sure this is not the last level (complete translation)
+            if (lvl != LookupLevel::Num_ArmLookupLevel - 1) {
+                _walkCache = true;
+            }
+        } else {
+            partialLevels[lookup_lvl] = false;
+        }
+    }
 }
 
 TLB::~TLB()
 {
-    if (table)
-        delete [] table;
+    delete[] table;
 }
 
-bool
-TLB::translateFunctional(ThreadContext *tc, Addr va, Addr &pa)
+void
+TLB::setTableWalker(TableWalker *table_walker)
 {
-    if (!miscRegValid)
-        updateMiscReg(tc);
-    TlbEntry *e = lookup(va, contextId, true);
-    if (!e)
-        return false;
-    pa = e->pAddr(va);
-    return true;
+    tableWalker = table_walker;
+    tableWalker->setTlb(this);
 }
 
 TlbEntry*
-TLB::lookup(Addr va, uint8_t cid, bool functional)
+TLB::match(const Lookup &lookup_data)
 {
-
-    TlbEntry *retval = NULL;
-
-    // Maitaining LRU array
+    // Vector of TLB entry candidates.
+    // Only one of them will be assigned to retval and will
+    // be returned to the MMU (in case of a hit)
+    // The vector has one entry per lookup level as it stores
+    // both complete and partial matches
+    std::vector<std::pair<int, const TlbEntry*>> hits{
+        LookupLevel::Num_ArmLookupLevel, {0, nullptr}};
 
     int x = 0;
-    while (retval == NULL && x < size) {
-        if (table[x].match(va, cid)) {
+    while (x < size) {
+        if (table[x].match(lookup_data)) {
+            const TlbEntry &entry = table[x];
+            hits[entry.lookupLevel] = std::make_pair(x, &entry);
 
-            // We only move the hit entry ahead when the position is higher than rangeMRU
-            if (x > rangeMRU) {
-                TlbEntry tmp_entry = table[x];
-                for(int i = x; i > 0; i--)
-                    table[i] = table[i-1];
-                table[0] = tmp_entry;
-                retval = &table[0];
-            } else {
-                retval = &table[x];
-            }
-            break;
+            // This is a complete translation, no need to loop further
+            if (!entry.partial)
+                break;
         }
-        x++;
+        ++x;
     }
 
-    DPRINTF(TLBVerbose, "Lookup %#x, cid %#x -> %s ppn %#x size: %#x pa: %#x ap:%d\n",
-            va, cid, retval ? "hit" : "miss", retval ? retval->pfn : 0,
-            retval ? retval->size : 0, retval ? retval->pAddr(va) : 0,
-            retval ? retval->ap : 0);
-    ;
+    // Loop over the list of TLB entries matching our translation
+    // request, starting from the highest lookup level (complete
+    // translation) and iterating backwards (using reverse iterators)
+    for (auto it = hits.rbegin(); it != hits.rend(); it++) {
+        const auto& [idx, entry] = *it;
+        if (!entry) {
+            // No match for the current LookupLevel
+            continue;
+        }
+
+        // Maintaining LRU array
+        // We only move the hit entry ahead when the position is higher
+        // than rangeMRU
+        if (idx > rangeMRU && !lookup_data.functional) {
+            TlbEntry tmp_entry = *entry;
+            for (int i = idx; i > 0; i--)
+                table[i] = table[i - 1];
+            table[0] = tmp_entry;
+            return &table[0];
+        } else {
+            return &table[idx];
+        }
+    }
+
+    return nullptr;
+}
+
+TlbEntry*
+TLB::lookup(const Lookup &lookup_data)
+{
+    const auto mode = lookup_data.mode;
+
+    TlbEntry *retval = match(lookup_data);
+
+    DPRINTF(TLBVerbose, "Lookup %#x, asn %#x -> %s vmn 0x%x hyp %d secure %d "
+            "ppn %#x size: %#x pa: %#x ap:%d ns:%d nstid:%d g:%d asid: %d "
+            "el: %d\n",
+            lookup_data.va, lookup_data.asn, retval ? "hit" : "miss",
+            lookup_data.vmid, lookup_data.hyp, lookup_data.secure,
+            retval ? retval->pfn       : 0, retval ? retval->size  : 0,
+            retval ? retval->pAddr(lookup_data.va) : 0,
+            retval ? retval->ap        : 0,
+            retval ? retval->ns        : 0, retval ? retval->nstid : 0,
+            retval ? retval->global    : 0, retval ? retval->asid  : 0,
+            retval ? retval->el        : 0);
+
+    // Updating stats if this was not a functional lookup
+    if (!lookup_data.functional) {
+        if (!retval) {
+            if (mode == BaseMMU::Execute) {
+                stats.instMisses++;
+            } else if (mode == BaseMMU::Write) {
+                stats.writeMisses++;
+            } else {
+                stats.readMisses++;
+            }
+        } else {
+            if (retval->partial) {
+                stats.partialHits++;
+            }
+
+            if (mode == BaseMMU::Execute) {
+                stats.instHits++;
+            } else if (mode == BaseMMU::Write) {
+               stats.writeHits++;
+            } else {
+                stats.readHits++;
+            }
+        }
+    }
+
     return retval;
+}
+
+TlbEntry*
+TLB::multiLookup(const Lookup &lookup_data)
+{
+    TlbEntry* te = lookup(lookup_data);
+
+    if (te) {
+        checkPromotion(te, lookup_data.mode);
+    } else {
+        if (auto tlb = static_cast<TLB*>(nextLevel())) {
+            te = tlb->multiLookup(lookup_data);
+            if (te && !lookup_data.functional &&
+                (!te->partial || partialLevels[te->lookupLevel])) {
+                // Insert entry only if this is not a functional
+                // lookup and if the translation is complete (unless this
+                // TLB caches partial translations)
+                insert(*te);
+            }
+        }
+    }
+
+    return te;
+}
+
+void
+TLB::checkPromotion(TlbEntry *entry, BaseMMU::Mode mode)
+{
+    TypeTLB acc_type = (mode == BaseMMU::Execute) ?
+       TypeTLB::instruction : TypeTLB::data;
+
+    // Hitting an instruction TLB entry on a data access or
+    // a data TLB entry on an instruction access:
+    // promoting the entry to unified
+    if (!(entry->type & acc_type))
+       entry->type = TypeTLB::unified;
 }
 
 // insert a new TLB entry
 void
-TLB::insert(Addr addr, TlbEntry &entry)
+TLB::insert(TlbEntry &entry)
 {
     DPRINTF(TLB, "Inserting entry into TLB with pfn:%#x size:%#x vpn: %#x"
-            " asid:%d N:%d global:%d valid:%d nc:%d sNp:%d xn:%d ap:%#x"
-            " domain:%#x\n", entry.pfn, entry.size, entry.vpn, entry.asid,
-            entry.N, entry.global, entry.valid, entry.nonCacheable, entry.sNp,
-            entry.xn, entry.ap, entry.domain);
+            " asid:%d vmid:%d N:%d global:%d valid:%d nc:%d xn:%d"
+            " ap:%#x domain:%#x ns:%d nstid:%d isHyp:%d\n", entry.pfn,
+            entry.size, entry.vpn, entry.asid, entry.vmid, entry.N,
+            entry.global, entry.valid, entry.nonCacheable, entry.xn,
+            entry.ap, static_cast<uint8_t>(entry.domain), entry.ns, entry.nstid,
+            entry.isHyp);
 
-    if (table[size-1].valid)
-        DPRINTF(TLB, " - Replacing Valid entry %#x, asn %d ppn %#x size: %#x ap:%d\n",
+    if (table[size - 1].valid)
+        DPRINTF(TLB, " - Replacing Valid entry %#x, asn %d vmn %d ppn %#x "
+                "size: %#x ap:%d ns:%d nstid:%d g:%d isHyp:%d el: %d\n",
                 table[size-1].vpn << table[size-1].N, table[size-1].asid,
-                table[size-1].pfn << table[size-1].N, table[size-1].size,
-                table[size-1].ap);
+                table[size-1].vmid, table[size-1].pfn << table[size-1].N,
+                table[size-1].size, table[size-1].ap, table[size-1].ns,
+                table[size-1].nstid, table[size-1].global, table[size-1].isHyp,
+                table[size-1].el);
 
-    //inserting to MRU position and evicting the LRU one
-
-    for(int i = size-1; i > 0; i--)
-      table[i] = table[i-1];
+    // inserting to MRU position and evicting the LRU one
+    for (int i = size - 1; i > 0; --i)
+        table[i] = table[i-1];
     table[0] = entry;
 
-    inserts++;
+    stats.inserts++;
+    ppRefills->notify(1);
 }
 
 void
-TLB::printTlb()
+TLB::multiInsert(TlbEntry &entry)
+{
+    // Insert a partial translation only if the TLB is configured
+    // as a walk cache
+    if (!entry.partial || partialLevels[entry.lookupLevel]) {
+        insert(entry);
+    }
+
+    if (auto next_level = static_cast<TLB*>(nextLevel())) {
+        next_level->multiInsert(entry);
+    }
+}
+
+void
+TLB::printTlb() const
 {
     int x = 0;
     TlbEntry *te;
     DPRINTF(TLB, "Current TLB contents:\n");
     while (x < size) {
-       te = &table[x];
-       if (te->valid)
-           DPRINTF(TLB, " *  %#x, asn %d ppn %#x size: %#x ap:%d\n",
-                te->vpn << te->N, te->asid, te->pfn << te->N, te->size, te->ap);
-       x++;
+        te = &table[x];
+        if (te->valid)
+            DPRINTF(TLB, " *  %s\n", te->print());
+        ++x;
     }
 }
-
 
 void
 TLB::flushAll()
@@ -177,561 +301,110 @@ TLB::flushAll()
     int x = 0;
     TlbEntry *te;
     while (x < size) {
-       te = &table[x];
-       if (te->valid) {
-           DPRINTF(TLB, " -  %#x, asn %d ppn %#x size: %#x ap:%d\n",
-                te->vpn << te->N, te->asid, te->pfn << te->N, te->size, te->ap);
-           flushedEntries++;
-       }
-       x++;
+        te = &table[x];
+
+        if (te->valid) {
+            DPRINTF(TLB, " -  %s\n", te->print());
+            te->valid = false;
+            stats.flushedEntries++;
+        }
+        ++x;
     }
 
-    memset(table, 0, sizeof(TlbEntry) * size);
-
-    flushTlb++;
-}
-
-
-void
-TLB::flushMvaAsid(Addr mva, uint64_t asn)
-{
-    DPRINTF(TLB, "Flushing mva %#x asid: %#x\n", mva, asn);
-    TlbEntry *te;
-
-    te = lookup(mva, asn);
-    while (te != NULL) {
-     DPRINTF(TLB, " -  %#x, asn %d ppn %#x size: %#x ap:%d\n",
-            te->vpn << te->N, te->asid, te->pfn << te->N, te->size, te->ap);
-        te->valid = false;
-        flushedEntries++;
-        te = lookup(mva,asn);
-    }
-    flushTlbMvaAsid++;
+    stats.flushTlb++;
 }
 
 void
-TLB::flushAsid(uint64_t asn)
+TLB::flush(const TLBIOp& tlbi_op)
 {
-    DPRINTF(TLB, "Flushing all entries with asid: %#x\n", asn);
-
     int x = 0;
     TlbEntry *te;
-
     while (x < size) {
         te = &table[x];
-        if (te->asid == asn) {
+        if (tlbi_op.match(te, vmid)) {
+            DPRINTF(TLB, " -  %s\n", te->print());
             te->valid = false;
-            DPRINTF(TLB, " -  %#x, asn %d ppn %#x size: %#x ap:%d\n",
-                te->vpn << te->N, te->asid, te->pfn << te->N, te->size, te->ap);
-            flushedEntries++;
+            stats.flushedEntries++;
         }
-        x++;
+        ++x;
     }
-    flushTlbAsid++;
+
+    stats.flushTlb++;
 }
 
 void
-TLB::flushMva(Addr mva)
+TLB::takeOverFrom(BaseTLB *_otlb)
 {
-    DPRINTF(TLB, "Flushing all entries with mva: %#x\n", mva);
+}
 
-    int x = 0;
-    TlbEntry *te;
+TLB::TlbStats::TlbStats(TLB &parent)
+  : statistics::Group(&parent), tlb(parent),
+    ADD_STAT(partialHits, statistics::units::Count::get(),
+             "partial translation hits"),
+    ADD_STAT(instHits, statistics::units::Count::get(), "Inst hits"),
+    ADD_STAT(instMisses, statistics::units::Count::get(), "Inst misses"),
+    ADD_STAT(readHits, statistics::units::Count::get(), "Read hits"),
+    ADD_STAT(readMisses, statistics::units::Count::get(),  "Read misses"),
+    ADD_STAT(writeHits, statistics::units::Count::get(), "Write hits"),
+    ADD_STAT(writeMisses, statistics::units::Count::get(), "Write misses"),
+    ADD_STAT(inserts, statistics::units::Count::get(),
+             "Number of times an entry is inserted into the TLB"),
+    ADD_STAT(flushTlb, statistics::units::Count::get(),
+             "Number of times a TLB invalidation was requested"),
+    ADD_STAT(flushedEntries, statistics::units::Count::get(),
+             "Number of entries that have been flushed from TLB"),
+    ADD_STAT(readAccesses, statistics::units::Count::get(), "Read accesses",
+             readHits + readMisses),
+    ADD_STAT(writeAccesses, statistics::units::Count::get(), "Write accesses",
+             writeHits + writeMisses),
+    ADD_STAT(instAccesses, statistics::units::Count::get(), "Inst accesses",
+             instHits + instMisses),
+    ADD_STAT(hits, statistics::units::Count::get(),
+             "Total TLB (inst and data) hits",
+             readHits + writeHits + instHits),
+    ADD_STAT(misses, statistics::units::Count::get(),
+             "Total TLB (inst and data) misses",
+             readMisses + writeMisses + instMisses),
+    ADD_STAT(accesses, statistics::units::Count::get(),
+             "Total TLB (inst and data) accesses",
+             readAccesses + writeAccesses + instAccesses)
+{
+    // If this is a pure Data TLB, mark the instruction
+    // stats as nozero, so that they won't make it in
+    // into the final stats file
+    if (tlb.type() == TypeTLB::data) {
+        instHits.flags(statistics::nozero);
+        instMisses.flags(statistics::nozero);
 
-    while (x < size) {
-        te = &table[x];
-        Addr v = te->vpn << te->N;
-        if (mva >= v && mva < v + te->size) {
-            te->valid = false;
-            DPRINTF(TLB, " -  %#x, asn %d ppn %#x size: %#x ap:%d\n",
-                te->vpn << te->N, te->asid, te->pfn << te->N, te->size, te->ap);
-            flushedEntries++;
-        }
-        x++;
+        instAccesses.flags(statistics::nozero);
     }
-    flushTlbMva++;
+
+    // If this is a pure Instruction TLB, mark the data
+    // stats as nozero, so that they won't make it in
+    // into the final stats file
+    if (tlb.type() & TypeTLB::instruction) {
+        readHits.flags(statistics::nozero);
+        readMisses.flags(statistics::nozero);
+        writeHits.flags(statistics::nozero);
+        writeMisses.flags(statistics::nozero);
+
+        readAccesses.flags(statistics::nozero);
+        writeAccesses.flags(statistics::nozero);
+    }
+
+    partialHits.flags(statistics::nozero);
 }
 
 void
-TLB::serialize(ostream &os)
+TLB::regProbePoints()
 {
-    DPRINTF(Checkpoint, "Serializing Arm TLB\n");
-
-    SERIALIZE_SCALAR(_attr);
-
-    int num_entries = size;
-    SERIALIZE_SCALAR(num_entries);
-    for(int i = 0; i < size; i++){
-        nameOut(os, csprintf("%s.TlbEntry%d", name(), i));
-        table[i].serialize(os);
-    }
+    ppRefills.reset(new probing::PMU(getProbeManager(), "Refills"));
 }
 
-void
-TLB::unserialize(Checkpoint *cp, const string &section)
+Port *
+TLB::getTableWalkerPort()
 {
-    DPRINTF(Checkpoint, "Unserializing Arm TLB\n");
-
-    UNSERIALIZE_SCALAR(_attr);
-    int num_entries;
-    UNSERIALIZE_SCALAR(num_entries);
-    for(int i = 0; i < min(size, num_entries); i++){
-        table[i].unserialize(cp, csprintf("%s.TlbEntry%d", section, i));
-    }
-    miscRegValid = false;
+    return &tableWalker->getTableWalkerPort();
 }
 
-void
-TLB::regStats()
-{
-    instHits
-        .name(name() + ".inst_hits")
-        .desc("ITB inst hits")
-        ;
-
-    instMisses
-        .name(name() + ".inst_misses")
-        .desc("ITB inst misses")
-        ;
-
-    instAccesses
-        .name(name() + ".inst_accesses")
-        .desc("ITB inst accesses")
-        ;
-
-    readHits
-        .name(name() + ".read_hits")
-        .desc("DTB read hits")
-        ;
-
-    readMisses
-        .name(name() + ".read_misses")
-        .desc("DTB read misses")
-        ;
-
-    readAccesses
-        .name(name() + ".read_accesses")
-        .desc("DTB read accesses")
-        ;
-
-    writeHits
-        .name(name() + ".write_hits")
-        .desc("DTB write hits")
-        ;
-
-    writeMisses
-        .name(name() + ".write_misses")
-        .desc("DTB write misses")
-        ;
-
-    writeAccesses
-        .name(name() + ".write_accesses")
-        .desc("DTB write accesses")
-        ;
-
-    hits
-        .name(name() + ".hits")
-        .desc("DTB hits")
-        ;
-
-    misses
-        .name(name() + ".misses")
-        .desc("DTB misses")
-        ;
-
-    accesses
-        .name(name() + ".accesses")
-        .desc("DTB accesses")
-        ;
-
-    flushTlb
-        .name(name() + ".flush_tlb")
-        .desc("Number of times complete TLB was flushed")
-        ;
-
-    flushTlbMva
-        .name(name() + ".flush_tlb_mva")
-        .desc("Number of times TLB was flushed by MVA")
-        ;
-
-    flushTlbMvaAsid
-        .name(name() + ".flush_tlb_mva_asid")
-        .desc("Number of times TLB was flushed by MVA & ASID")
-        ;
-
-    flushTlbAsid
-        .name(name() + ".flush_tlb_asid")
-        .desc("Number of times TLB was flushed by ASID")
-        ;
-
-    flushedEntries
-        .name(name() + ".flush_entries")
-        .desc("Number of entries that have been flushed from TLB")
-        ;
-
-    alignFaults
-        .name(name() + ".align_faults")
-        .desc("Number of TLB faults due to alignment restrictions")
-        ;
-
-    prefetchFaults
-        .name(name() + ".prefetch_faults")
-        .desc("Number of TLB faults due to prefetch")
-        ;
-
-    domainFaults
-        .name(name() + ".domain_faults")
-        .desc("Number of TLB faults due to domain restrictions")
-        ;
-
-    permsFaults
-        .name(name() + ".perms_faults")
-        .desc("Number of TLB faults due to permissions restrictions")
-        ;
-
-    instAccesses = instHits + instMisses;
-    readAccesses = readHits + readMisses;
-    writeAccesses = writeHits + writeMisses;
-    hits = readHits + writeHits + instHits;
-    misses = readMisses + writeMisses + instMisses;
-    accesses = readAccesses + writeAccesses + instAccesses;
-}
-
-Fault
-TLB::translateSe(RequestPtr req, ThreadContext *tc, Mode mode,
-        Translation *translation, bool &delay, bool timing)
-{
-    if (!miscRegValid)
-        updateMiscReg(tc);
-    Addr vaddr = req->getVaddr();
-    uint32_t flags = req->getFlags();
-
-    bool is_fetch = (mode == Execute);
-    bool is_write = (mode == Write);
-
-    if (!is_fetch) {
-        assert(flags & MustBeOne);
-        if (sctlr.a || !(flags & AllowUnaligned)) {
-            if (vaddr & flags & AlignmentMask) {
-                return new DataAbort(vaddr, 0, is_write, ArmFault::AlignmentFault);
-            }
-        }
-    }
-
-    Addr paddr;
-    Process *p = tc->getProcessPtr();
-
-    if (!p->pTable->translate(vaddr, paddr))
-        return Fault(new GenericPageTableFault(vaddr));
-    req->setPaddr(paddr);
-
-    return NoFault;
-}
-
-Fault
-TLB::trickBoxCheck(RequestPtr req, Mode mode, uint8_t domain, bool sNp)
-{
-    return NoFault;
-}
-
-Fault
-TLB::walkTrickBoxCheck(Addr pa, Addr va, Addr sz, bool is_exec,
-        bool is_write, uint8_t domain, bool sNp)
-{
-    return NoFault;
-}
-
-Fault
-TLB::translateFs(RequestPtr req, ThreadContext *tc, Mode mode,
-        Translation *translation, bool &delay, bool timing, bool functional)
-{
-    // No such thing as a functional timing access
-    assert(!(timing && functional));
-
-    if (!miscRegValid) {
-        updateMiscReg(tc);
-        DPRINTF(TLBVerbose, "TLB variables changed!\n");
-    }
-
-    Addr vaddr = req->getVaddr();
-    uint32_t flags = req->getFlags();
-
-    bool is_fetch = (mode == Execute);
-    bool is_write = (mode == Write);
-    bool is_priv = isPriv && !(flags & UserMode);
-
-    req->setAsid(contextId.asid);
-
-    DPRINTF(TLBVerbose, "CPSR is priv:%d UserMode:%d\n",
-            isPriv, flags & UserMode);
-    // If this is a clrex instruction, provide a PA of 0 with no fault
-    // This will force the monitor to set the tracked address to 0
-    // a bit of a hack but this effectively clrears this processors monitor
-    if (flags & Request::CLEAR_LL){
-       req->setPaddr(0);
-       req->setFlags(Request::UNCACHEABLE);
-       req->setFlags(Request::CLEAR_LL);
-       return NoFault;
-    }
-    if ((req->isInstFetch() && (!sctlr.i)) ||
-        ((!req->isInstFetch()) && (!sctlr.c))){
-       req->setFlags(Request::UNCACHEABLE);
-    }
-    if (!is_fetch) {
-        assert(flags & MustBeOne);
-        if (sctlr.a || !(flags & AllowUnaligned)) {
-            if (vaddr & flags & AlignmentMask) {
-                alignFaults++;
-                return new DataAbort(vaddr, 0, is_write, ArmFault::AlignmentFault);
-            }
-        }
-    }
-
-    Fault fault;
-
-    if (!sctlr.m) {
-        req->setPaddr(vaddr);
-        if (sctlr.tre == 0) {
-            req->setFlags(Request::UNCACHEABLE);
-        } else {
-            if (nmrr.ir0 == 0 || nmrr.or0 == 0 || prrr.tr0 != 0x2)
-               req->setFlags(Request::UNCACHEABLE);
-        }
-
-        // Set memory attributes
-        TlbEntry temp_te;
-        tableWalker->memAttrs(tc, temp_te, sctlr, 0, 1);
-        temp_te.shareable = true;
-        DPRINTF(TLBVerbose, "(No MMU) setting memory attributes: shareable:\
-                %d, innerAttrs: %d, outerAttrs: %d\n", temp_te.shareable,
-                temp_te.innerAttrs, temp_te.outerAttrs);
-        setAttr(temp_te.attributes);
-
-        return trickBoxCheck(req, mode, 0, false);
-    }
-
-    DPRINTF(TLBVerbose, "Translating vaddr=%#x context=%d\n", vaddr, contextId);
-    // Translation enabled
-
-    TlbEntry *te = lookup(vaddr, contextId);
-    if (te == NULL) {
-        if (req->isPrefetch()){
-           //if the request is a prefetch don't attempt to fill the TLB
-           //or go any further with the memory access
-           prefetchFaults++;
-           return new PrefetchAbort(vaddr, ArmFault::PrefetchTLBMiss);
-        }
-
-        if (is_fetch)
-            instMisses++;
-        else if (is_write)
-            writeMisses++;
-        else
-            readMisses++;
-
-        // start translation table walk, pass variables rather than
-        // re-retreaving in table walker for speed
-        DPRINTF(TLB, "TLB Miss: Starting hardware table walker for %#x(%d)\n",
-                vaddr, contextId);
-        fault = tableWalker->walk(req, tc, contextId, mode, translation,
-                                  timing, functional);
-        if (timing && fault == NoFault) {
-            delay = true;
-            // for timing mode, return and wait for table walk
-            return fault;
-        }
-        if (fault)
-            return fault;
-
-        te = lookup(vaddr, contextId);
-        if (!te)
-            printTlb();
-        assert(te);
-    } else {
-        if (is_fetch)
-            instHits++;
-        else if (is_write)
-            writeHits++;
-        else
-            readHits++;
-    }
-
-    // Set memory attributes
-    DPRINTF(TLBVerbose,
-            "Setting memory attributes: shareable: %d, innerAttrs: %d, \
-            outerAttrs: %d\n",
-            te->shareable, te->innerAttrs, te->outerAttrs);
-    setAttr(te->attributes);
-    if (te->nonCacheable) {
-        req->setFlags(Request::UNCACHEABLE);
-
-        // Prevent prefetching from I/O devices.
-        if (req->isPrefetch()) {
-            return new PrefetchAbort(vaddr, ArmFault::PrefetchUncacheable);
-        }
-    }
-
-    if (!bootUncacheability &&
-            ((ArmSystem*)tc->getSystemPtr())->adderBootUncacheable(vaddr))
-        req->setFlags(Request::UNCACHEABLE);
-
-    switch ( (dacr >> (te->domain * 2)) & 0x3) {
-      case 0:
-        domainFaults++;
-        DPRINTF(TLB, "TLB Fault: Data abort on domain. DACR: %#x domain: %#x"
-               " write:%d sNp:%d\n", dacr, te->domain, is_write, te->sNp);
-        if (is_fetch)
-            return new PrefetchAbort(vaddr,
-                (te->sNp ? ArmFault::Domain0 : ArmFault::Domain1));
-        else
-            return new DataAbort(vaddr, te->domain, is_write,
-                (te->sNp ? ArmFault::Domain0 : ArmFault::Domain1));
-      case 1:
-        // Continue with permissions check
-        break;
-      case 2:
-        panic("UNPRED domain\n");
-      case 3:
-        req->setPaddr(te->pAddr(vaddr));
-        fault = trickBoxCheck(req, mode, te->domain, te->sNp);
-        if (fault)
-            return fault;
-        return NoFault;
-    }
-
-    uint8_t ap = te->ap;
-
-    if (sctlr.afe == 1)
-        ap |= 1;
-
-    bool abt;
-
-   /* if (!sctlr.xp)
-        ap &= 0x3;
-*/
-    switch (ap) {
-      case 0:
-        DPRINTF(TLB, "Access permissions 0, checking rs:%#x\n", (int)sctlr.rs);
-        if (!sctlr.xp) {
-            switch ((int)sctlr.rs) {
-              case 2:
-                abt = is_write;
-                break;
-              case 1:
-                abt = is_write || !is_priv;
-                break;
-              case 0:
-              case 3:
-              default:
-                abt = true;
-                break;
-            }
-        } else {
-            abt = true;
-        }
-        break;
-      case 1:
-        abt = !is_priv;
-        break;
-      case 2:
-        abt = !is_priv && is_write;
-        break;
-      case 3:
-        abt = false;
-        break;
-      case 4:
-        panic("UNPRED premissions\n");
-      case 5:
-        abt = !is_priv || is_write;
-        break;
-      case 6:
-      case 7:
-        abt = is_write;
-        break;
-      default:
-        panic("Unknown permissions\n");
-    }
-    if ((is_fetch) && (abt || te->xn)) {
-        permsFaults++;
-        DPRINTF(TLB, "TLB Fault: Prefetch abort on permission check. AP:%d priv:%d"
-               " write:%d sNp:%d\n", ap, is_priv, is_write, te->sNp);
-        return new PrefetchAbort(vaddr,
-                (te->sNp ? ArmFault::Permission0 :
-                 ArmFault::Permission1));
-    } else if (abt) {
-        permsFaults++;
-        DPRINTF(TLB, "TLB Fault: Data abort on permission check. AP:%d priv:%d"
-               " write:%d sNp:%d\n", ap, is_priv, is_write, te->sNp);
-        return new DataAbort(vaddr, te->domain, is_write,
-                (te->sNp ? ArmFault::Permission0 :
-                 ArmFault::Permission1));
-    }
-
-    req->setPaddr(te->pAddr(vaddr));
-    // Check for a trickbox generated address fault
-    fault = trickBoxCheck(req, mode, te->domain, te->sNp);
-    if (fault)
-        return fault;
-
-    return NoFault;
-}
-
-Fault
-TLB::translateAtomic(RequestPtr req, ThreadContext *tc, Mode mode)
-{
-    bool delay = false;
-    Fault fault;
-    if (FullSystem)
-        fault = translateFs(req, tc, mode, NULL, delay, false);
-    else
-        fault = translateSe(req, tc, mode, NULL, delay, false);
-    assert(!delay);
-    return fault;
-}
-
-Fault
-TLB::translateFunctional(RequestPtr req, ThreadContext *tc, Mode mode)
-{
-    bool delay = false;
-    Fault fault;
-    if (FullSystem)
-        fault = translateFs(req, tc, mode, NULL, delay, false, true);
-    else
-        fault = translateSe(req, tc, mode, NULL, delay, false);
-    assert(!delay);
-    return fault;
-}
-
-Fault
-TLB::translateTiming(RequestPtr req, ThreadContext *tc,
-        Translation *translation, Mode mode)
-{
-    assert(translation);
-    bool delay = false;
-    Fault fault;
-    if (FullSystem)
-        fault = translateFs(req, tc, mode, translation, delay, true);
-    else
-        fault = translateSe(req, tc, mode, translation, delay, true);
-    DPRINTF(TLBVerbose, "Translation returning delay=%d fault=%d\n", delay, fault !=
-            NoFault);
-    if (!delay)
-        translation->finish(fault, req, tc, mode);
-    else
-        translation->markDelayed();
-    return fault;
-}
-
-BaseMasterPort*
-TLB::getMasterPort()
-{
-    return &tableWalker->getMasterPort("port");
-}
-
-
-
-ArmISA::TLB *
-ArmTLBParams::create()
-{
-    return new ArmISA::TLB(this);
-}
+} // namespace gem5

@@ -1,4 +1,16 @@
 /*
+ * Copyright (c) 2021 ARM Limited
+ * All rights reserved.
+ *
+ * The license below extends only to copyright in the software and shall
+ * not be construed as granting a license to any other intellectual
+ * property including but not limited to intellectual property relating
+ * to a hardware implementation of the functionality of the software
+ * licensed hereunder.  You may use the software subject to the license
+ * terms below provided that you ensure that this notice is replicated
+ * unmodified and in its entirety in all distributions of the software,
+ * modified or unmodified, in source code or in binary form.
+ *
  * Copyright (c) 2008 Mark D. Hill and David A. Wood
  * All rights reserved.
  *
@@ -26,16 +38,34 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
+#include "mem/ruby/system/DMASequencer.hh"
+
+#include <memory>
+
 #include "debug/RubyDma.hh"
 #include "debug/RubyStats.hh"
-#include "mem/protocol/SequencerMsg.hh"
-#include "mem/protocol/SequencerRequestType.hh"
-#include "mem/ruby/buffers/MessageBuffer.hh"
-#include "mem/ruby/system/DMASequencer.hh"
-#include "mem/ruby/system/System.hh"
+#include "mem/ruby/protocol/SequencerMsg.hh"
+#include "mem/ruby/protocol/SequencerRequestType.hh"
+#include "mem/ruby/system/RubySystem.hh"
 
-DMASequencer::DMASequencer(const Params *p)
-    : RubyPort(p)
+namespace gem5
+{
+
+namespace ruby
+{
+
+DMARequest::DMARequest(uint64_t start_paddr, int len, bool write,
+                       int bytes_completed, int bytes_issued, uint8_t *data,
+                       PacketPtr pkt)
+    : start_paddr(start_paddr), len(len), write(write),
+      bytes_completed(bytes_completed), bytes_issued(bytes_issued), data(data),
+      pkt(pkt)
+{
+}
+
+DMASequencer::DMASequencer(const Params &p)
+    : RubyPort(p), m_outstanding_count(0),
+      m_max_outstanding_requests(p.max_outstanding_requests)
 {
 }
 
@@ -43,37 +73,76 @@ void
 DMASequencer::init()
 {
     RubyPort::init();
-    m_is_busy = false;
-    m_data_block_mask = ~ (~0 << RubySystem::getBlockSizeBits());
+    m_data_block_mask = mask(RubySystem::getBlockSizeBits());
 }
 
 RequestStatus
 DMASequencer::makeRequest(PacketPtr pkt)
 {
-    if (m_is_busy) {
+    if (m_outstanding_count == m_max_outstanding_requests) {
         return RequestStatus_BufferFull;
     }
 
-    uint64_t paddr = pkt->getAddr();
-    uint8_t* data =  pkt->getPtr<uint8_t>(true);
+    Addr paddr = pkt->getAddr();
+    uint8_t* data =  pkt->getPtr<uint8_t>();
     int len = pkt->getSize();
     bool write = pkt->isWrite();
 
-    assert(!m_is_busy);  // only support one outstanding DMA request
-    m_is_busy = true;
+    // Should DMA be allowed to generate this ?
+    assert(!pkt->isMaskedWrite());
 
-    active_request.start_paddr = paddr;
-    active_request.write = write;
-    active_request.data = data;
-    active_request.len = len;
-    active_request.bytes_completed = 0;
-    active_request.bytes_issued = 0;
-    active_request.pkt = pkt;
+    assert(m_outstanding_count < m_max_outstanding_requests);
+    Addr line_addr = makeLineAddress(paddr);
+    auto emplace_pair =
+        m_RequestTable.emplace(std::piecewise_construct,
+                               std::forward_as_tuple(line_addr),
+                               std::forward_as_tuple(paddr, len, write, 0,
+                                                     0, data, pkt));
+    DMARequest& active_request = emplace_pair.first->second;
 
-    SequencerMsg *msg = new SequencerMsg;
-    msg->getPhysicalAddress() = Address(paddr);
-    msg->getLineAddress() = line_address(msg->getPhysicalAddress());
-    msg->getType() = write ? SequencerRequestType_ST : SequencerRequestType_LD;
+    // This is pretty conservative.  A regular Sequencer with a  more beefy
+    // request table that can track multiple requests for a cache line should
+    // be used if a more aggressive policy is needed.
+    if (!emplace_pair.second) {
+            DPRINTF(RubyDma, "DMA aliased: addr %p, len %d\n", line_addr, len);
+            return RequestStatus_Aliased;
+    }
+
+    DPRINTF(RubyDma, "DMA req created: addr %p, len %d\n", line_addr, len);
+
+    std::shared_ptr<SequencerMsg> msg =
+        std::make_shared<SequencerMsg>(clockEdge());
+    msg->getPhysicalAddress() = paddr;
+    msg->getLineAddress() = line_addr;
+
+    if (pkt->req->isAtomic()) {
+        msg->setType(SequencerRequestType_ATOMIC);
+
+        // While regular LD/ST can support DMAs spanning multiple cache lines,
+        // atomic requests are only supported within a single cache line. The
+        // atomic request will end upon atomicCallback and not call issueNext.
+        int block_size = m_ruby_system->getBlockSizeBytes();
+        int atomic_offset = pkt->getAddr() - line_addr;
+        std::vector<bool> access_mask(block_size, false);
+        assert(atomic_offset + pkt->getSize() <= block_size);
+
+        for (int idx = 0; idx < pkt->getSize(); ++idx) {
+            access_mask[atomic_offset + idx] = true;
+        }
+
+        std::vector<std::pair<int, AtomicOpFunctor*>> atomic_ops;
+        std::pair<int, AtomicOpFunctor*>
+            atomic_op(atomic_offset, pkt->getAtomicOp());
+
+        atomic_ops.emplace_back(atomic_op);
+        msg->getwriteMask().setAtomicOps(atomic_ops);
+    } else if (write) {
+        msg->setType(SequencerRequestType_ST);
+    } else {
+        assert(pkt->isRead());
+        msg->setType(SequencerRequestType_LD);
+    }
+
     int offset = paddr & m_data_block_mask;
 
     msg->getLen() = (offset + len) <= RubySystem::getBlockSizeBytes() ?
@@ -85,35 +154,42 @@ DMASequencer::makeRequest(PacketPtr pkt)
         }
     }
 
+    m_outstanding_count++;
+
     assert(m_mandatory_q_ptr != NULL);
-    m_mandatory_q_ptr->enqueue(msg);
+    m_mandatory_q_ptr->enqueue(msg, clockEdge(), cyclesToTicks(Cycles(1)));
     active_request.bytes_issued += msg->getLen();
 
     return RequestStatus_Issued;
 }
 
 void
-DMASequencer::issueNext()
+DMASequencer::issueNext(const Addr& address)
 {
-    assert(m_is_busy == true);
+    RequestTable::iterator i = m_RequestTable.find(address);
+    assert(i != m_RequestTable.end());
+
+    DMARequest &active_request = i->second;
+
+    assert(m_outstanding_count <= m_max_outstanding_requests);
     active_request.bytes_completed = active_request.bytes_issued;
     if (active_request.len == active_request.bytes_completed) {
-        //
-        // Must unset the busy flag before calling back the dma port because
-        // the callback may cause a previously nacked request to be reissued
-        //
-        DPRINTF(RubyDma, "DMA request completed\n");
-        m_is_busy = false;
-        ruby_hit_callback(active_request.pkt);
+        DPRINTF(RubyDma, "DMA request completed: addr %p, size %d\n",
+                address, active_request.len);
+        m_outstanding_count--;
+        PacketPtr pkt = active_request.pkt;
+        m_RequestTable.erase(i);
+        ruby_hit_callback(pkt);
         return;
     }
 
-    SequencerMsg *msg = new SequencerMsg;
-    msg->getPhysicalAddress() = Address(active_request.start_paddr +
-                                       active_request.bytes_completed);
+    std::shared_ptr<SequencerMsg> msg =
+        std::make_shared<SequencerMsg>(clockEdge());
+    msg->getPhysicalAddress() = active_request.start_paddr +
+                                active_request.bytes_completed;
 
-    assert((msg->getPhysicalAddress().getAddress() & m_data_block_mask) == 0);
-    msg->getLineAddress() = line_address(msg->getPhysicalAddress());
+    assert((msg->getPhysicalAddress() & m_data_block_mask) == 0);
+    msg->getLineAddress() = makeLineAddress(msg->getPhysicalAddress());
 
     msg->getType() = (active_request.write ? SequencerRequestType_ST :
                      SequencerRequestType_LD);
@@ -128,50 +204,69 @@ DMASequencer::issueNext()
         msg->getDataBlk().
             setData(&active_request.data[active_request.bytes_completed],
                     0, msg->getLen());
-        msg->getType() = SequencerRequestType_ST;
-    } else {
-        msg->getType() = SequencerRequestType_LD;
     }
 
     assert(m_mandatory_q_ptr != NULL);
-    m_mandatory_q_ptr->enqueue(msg);
+    m_mandatory_q_ptr->enqueue(msg, clockEdge(), cyclesToTicks(Cycles(1)));
     active_request.bytes_issued += msg->getLen();
-    DPRINTF(RubyDma, 
+    DPRINTF(RubyDma,
             "DMA request bytes issued %d, bytes completed %d, total len %d\n",
             active_request.bytes_issued, active_request.bytes_completed,
             active_request.len);
 }
 
 void
-DMASequencer::dataCallback(const DataBlock & dblk)
+DMASequencer::dataCallback(const DataBlock & dblk, const Addr& address)
 {
-    assert(m_is_busy == true);
+
+    RequestTable::iterator i = m_RequestTable.find(address);
+    assert(i != m_RequestTable.end());
+
+    DMARequest &active_request = i->second;
     int len = active_request.bytes_issued - active_request.bytes_completed;
     int offset = 0;
     if (active_request.bytes_completed == 0)
         offset = active_request.start_paddr & m_data_block_mask;
-    assert(active_request.write == false);
+    assert(!active_request.write);
     if (active_request.data != NULL) {
         memcpy(&active_request.data[active_request.bytes_completed],
                dblk.getData(offset, len), len);
     }
-    issueNext();
+    issueNext(address);
 }
 
 void
-DMASequencer::ackCallback()
+DMASequencer::ackCallback(const Addr& address)
 {
-    issueNext();
+    assert(m_RequestTable.find(address) != m_RequestTable.end());
+    issueNext(address);
 }
 
 void
-DMASequencer::recordRequestType(DMASequencerRequestType requestType) {
+DMASequencer::atomicCallback(const DataBlock& dblk, const Addr& address)
+{
+    RequestTable::iterator i = m_RequestTable.find(address);
+    assert(i != m_RequestTable.end());
+
+    DMARequest &active_request = i->second;
+    PacketPtr pkt = active_request.pkt;
+
+    int offset = active_request.start_paddr & m_data_block_mask;
+    memcpy(pkt->getPtr<uint8_t>(), dblk.getData(offset, pkt->getSize()),
+           pkt->getSize());
+
+    ruby_hit_callback(pkt);
+
+    m_outstanding_count--;
+    m_RequestTable.erase(i);
+}
+
+void
+DMASequencer::recordRequestType(DMASequencerRequestType requestType)
+{
     DPRINTF(RubyStats, "Recorded statistic: %s\n",
             DMASequencerRequestType_to_string(requestType));
 }
 
-DMASequencer *
-DMASequencerParams::create()
-{
-    return new DMASequencer(this);
-}
+} // namespace ruby
+} // namespace gem5

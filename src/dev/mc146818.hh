@@ -24,16 +24,18 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * Authors: Ali Saidi
- *          Andrew Schultz
- *          Miguel Serrano
  */
 
 #ifndef __DEV_MC146818_HH__
 #define __DEV_MC146818_HH__
 
+#include "base/bitunion.hh"
+#include "base/logging.hh"
+#include "sim/core.hh"
 #include "sim/eventq.hh"
+
+namespace gem5
+{
 
 /** Real-Time Clock (MC146818) */
 class MC146818 : public EventManager
@@ -50,6 +52,7 @@ class MC146818 : public EventManager
     {
         MC146818 * parent;
         Tick interval;
+        Tick offset;
 
         RTCEvent(MC146818 * _parent, Tick i);
 
@@ -67,11 +70,11 @@ class MC146818 : public EventManager
     struct RTCTickEvent : public Event
     {
         MC146818 * parent;
+        Tick offset;
 
-        RTCTickEvent(MC146818 * _parent) : parent(_parent)
-        {
-            parent->schedule(this, curTick() + SimClock::Int::s);
-        }
+        RTCTickEvent(MC146818 * _parent) :
+            parent(_parent), offset(sim_clock::as_int::s)
+        {}
 
         /** Event process to occur at interrupt*/
         void process();
@@ -91,10 +94,12 @@ class MC146818 : public EventManager
     RTCTickEvent tickEvent;
 
     /** Data for real-time clock function */
-    union {
+    union
+    {
         uint8_t clock_data[10];
 
-        struct {
+        struct
+        {
             uint8_t sec;
             uint8_t sec_alrm;
             uint8_t min;
@@ -112,16 +117,48 @@ class MC146818 : public EventManager
 
     void setTime(const struct tm time);
 
+    BitUnion8(RtcRegA)
+        Bitfield<7> uip;    /// 1 = date and time update in progress
+        Bitfield<6, 4> dv;  /// Divider configuration
+        /** Rate selection
+            0 = Disabled
+            For 32768 Hz time bases:
+              Freq = 32768Hz / 2**(n-1) for n >= 3
+              Freq = 256Hz if n = 1
+              Freq = 128Hz if n = 2
+            Othwerise:
+              Freq = 32768Hz / 2**(n-1)
+        */
+        Bitfield<3, 0> rs;
+    EndBitUnion(RtcRegA)
+
+    /// Is the DV field in regA set to disabled?
+    static inline bool rega_dv_disabled(const RtcRegA &reg);
+
+    BitUnion8(RtcRegB)
+        Bitfield<7> set;       /// stop clock updates
+        Bitfield<6> pie;       /// 1 = enable periodic clock interrupt
+        Bitfield<5> aie;       /// 1 = enable alarm interrupt
+        Bitfield<4> uie;       /// 1 = enable update-ended interrupt
+        Bitfield<3> sqwe;      /// 1 = output sqare wave at SQW pin
+        Bitfield<2> dm;        /// 0 = BCD, 1 = Binary coded time
+        Bitfield<1> format24h; /// 0 = 12 hours, 1 = 24 hours
+        Bitfield<0> dse;       /// USA Daylight Savings Time enable
+    EndBitUnion(RtcRegB)
+
     /** RTC status register A */
-    uint8_t stat_regA;
+    RtcRegA stat_regA;
 
     /** RTC status register B */
-    uint8_t stat_regB;
+    RtcRegB stat_regB;
 
   public:
     MC146818(EventManager *em, const std::string &name, const struct tm time,
             bool bcd, Tick frequency);
     virtual ~MC146818();
+
+    /** Start ticking */
+    virtual void startup();
 
     /** RTC write data */
     void writeData(const uint8_t addr, const uint8_t data);
@@ -136,7 +173,7 @@ class MC146818 : public EventManager
       * @param base The base name of the counter object.
       * @param os The stream to serialize to.
       */
-    void serialize(const std::string &base, std::ostream &os);
+    void serialize(const std::string &base, CheckpointOut &cp) const;
 
     /**
      * Reconstruct the state of this object from a checkpoint.
@@ -144,8 +181,9 @@ class MC146818 : public EventManager
      * @param cp The checkpoint use.
      * @param section The section name of this object
      */
-    void unserialize(const std::string &base, Checkpoint *cp,
-                     const std::string &section);
+    void unserialize(const std::string &base, CheckpointIn &cp);
 };
+
+} // namespace gem5
 
 #endif // __DEV_MC146818_HH__

@@ -34,17 +34,22 @@
 
 #include "mem/ruby/common/Address.hh"
 #include "mem/ruby/common/DataBlock.hh"
-#include "mem/ruby/common/Global.hh"
+
+namespace gem5
+{
+
+namespace ruby
+{
 
 class SubBlock
 {
   public:
     SubBlock() { }
-    SubBlock(const Address& addr, int size);
+    SubBlock(Addr addr, int size);
     ~SubBlock() { }
 
-    const Address& getAddress() const { return m_address; }
-    void setAddress(const Address& addr) { m_address = addr; }
+    Addr getAddress() const { return m_address; }
+    void setAddress(Addr addr) { m_address = addr; }
 
     int getSize() const { return m_data.size(); }
     void resize(int size) {  m_data.resize(size); }
@@ -67,7 +72,7 @@ class SubBlock
     void internalMergeFrom(const DataBlock& data);
 
     // Data Members (m_ prefix)
-    Address m_address;
+    Addr m_address;
     std::vector<uint8_t> m_data;
 };
 
@@ -78,5 +83,8 @@ operator<<(std::ostream& out, const SubBlock& obj)
     out << std::flush;
     return out;
 }
+
+} // namespace ruby
+} // namespace gem5
 
 #endif // __MEM_RUBY_COMMON_SUBBLOCK_HH__

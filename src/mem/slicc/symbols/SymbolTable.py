@@ -25,26 +25,31 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-from m5.util import makeDir
+import os
 
 from slicc.generate import html
 from slicc.symbols.StateMachine import StateMachine
 from slicc.symbols.Type import Type
 from slicc.util import Location
 
+
+def makeDir(path):
+    """Make a directory if it doesn't exist.  If the path does exist,
+    ensure that it is a directory"""
+    if os.path.exists(path):
+        if not os.path.isdir(path):
+            raise AttributeError(f"{path} exists but is not directory")
+    else:
+        os.makedirs(path, exist_ok=True)
+
+
 class SymbolTable(object):
     def __init__(self, slicc):
         self.slicc = slicc
 
         self.sym_vec = []
-        self.sym_map_vec = [ {} ]
+        self.sym_map_vec = [{}]
         self.machine_components = {}
-
-        pairs = {}
-        pairs["enumeration"] = "yes"
-        location = Location("init", 0, no_warning=not slicc.verbose)
-        MachineType = Type(self, "MachineType", location, pairs)
-        self.newSymbol(MachineType)
 
         pairs = {}
         pairs["primitive"] = "yes"
@@ -54,7 +59,7 @@ class SymbolTable(object):
         self.newSymbol(void)
 
     def __repr__(self):
-        return "[SymbolTable]" # FIXME
+        return "[SymbolTable]"  # FIXME
 
     def codeFormatter(self, *args, **kwargs):
         return self.slicc.codeFormatter(*args, **kwargs)
@@ -68,6 +73,11 @@ class SymbolTable(object):
         if id in self.sym_map_vec[-1]:
             sym.error("Symbol '%s' redeclared in same scope.", id)
 
+        for sym_map in self.sym_map_vec:
+            if id in sym_map:
+                if type(sym_map[id]) != type(sym):
+                    sym.error("Conflicting declaration of Symbol '%s'", id)
+
         # FIXME - warn on masking of a declaration in a previous frame
         self.sym_map_vec[-1][id] = sym
 
@@ -80,8 +90,8 @@ class SymbolTable(object):
 
             if types is not None:
                 if not isinstance(symbol, types):
-                    symbol.error("Symbol '%s' is not of types '%s'.",
-                                 symbol, types)
+                    continue  # there could be a name clash with other symbol
+                    # so rather than producing an error, keep trying
 
             return symbol
 
@@ -114,7 +124,7 @@ class SymbolTable(object):
     def registerGlobalSym(self, ident, symbol):
         # Check for redeclaration (global frame only)
         if ident in self.sym_map_vec[0]:
-            symbol.error("Symbol '%s' redeclared in global scope." % ident)
+            symbol.error(f"Symbol '{ident}' redeclared in global scope.")
 
         self.sym_map_vec[0][ident] = symbol
 
@@ -127,14 +137,13 @@ class SymbolTable(object):
         makeDir(path)
 
         code = self.codeFormatter()
-        code('/** Auto generated C++ code started by $__file__:$__line__ */')
 
         for include_path in includes:
             code('#include "${{include_path}}"')
 
         for symbol in self.sym_vec:
             if isinstance(symbol, Type) and not symbol.isPrimitive:
-                code('#include "mem/protocol/${{symbol.c_ident}}.hh"')
+                code('#include "mem/ruby/protocol/${{symbol.c_ident}}.hh"')
 
         code.write(path, "Types.hh")
 
@@ -146,12 +155,13 @@ class SymbolTable(object):
 
         machines = list(self.getAllType(StateMachine))
         if len(machines) > 1:
-            name = "%s_table.html" % machines[0].ident
+            name = f"{machines[0].ident}_table.html"
         else:
             name = "empty.html"
 
         code = self.codeFormatter()
-        code('''
+        code(
+            """
 <html>
 <head>
 <title>$path</title>
@@ -161,7 +171,8 @@ class SymbolTable(object):
     <frame name="Status" src="empty.html">
 </frameset>
 </html>
-''')
+"""
+        )
         code.write(path, "index.html")
 
         code = self.codeFormatter()
@@ -171,4 +182,5 @@ class SymbolTable(object):
         for symbol in self.sym_vec:
             symbol.writeHTMLFiles(path)
 
-__all__ = [ "SymbolTable" ]
+
+__all__ = ["SymbolTable"]

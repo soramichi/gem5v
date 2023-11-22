@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2005-2006 The Regents of The University of Michigan
+ * Copyright (c) 2013 Advanced Micro Devices, Inc.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -24,108 +25,109 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * Authors: Korey Sewell
- *          Kevin Lim
  */
 
 #ifndef __CPU_O3_SCOREBOARD_HH__
 #define __CPU_O3_SCOREBOARD_HH__
 
-#include <iostream>
-#include <utility>
+#include <cassert>
 #include <vector>
 
+#include "base/compiler.hh"
+#include "base/logging.hh"
 #include "base/trace.hh"
-#include "cpu/o3/comm.hh"
+#include "cpu/reg_class.hh"
+#include "debug/Scoreboard.hh"
+
+namespace gem5
+{
+
+namespace o3
+{
 
 /**
- * Implements a simple scoreboard to track which registers are ready.
- * This class assumes that the fp registers start, index wise, right after
- * the integer registers. The misc. registers start, index wise, right after
- * the fp registers.
- * @todo: Fix up handling of the zero register in case the decoder does not
- * automatically make insts that write the zero register into nops.
+ * Implements a simple scoreboard to track which registers are
+ * ready. This class operates on the unified physical register space,
+ * because the different classes of registers do not need to be distinguished.
+ * Registers being part of a fixed mapping are always considered ready.
  */
 class Scoreboard
 {
+  private:
+    /** The object name, for DPRINTF.  We have to declare this
+     *  explicitly because Scoreboard is not a SimObject. */
+    const std::string _name;
+
+    /** Scoreboard of physical integer registers, saying whether or not they
+     *  are ready. */
+    std::vector<bool> regScoreBoard;
+
+    /** The number of actual physical registers */
+    GEM5_CLASS_VAR_USED unsigned numPhysRegs;
+
   public:
     /** Constructs a scoreboard.
-     *  @param activeThreads The number of active threads.
-     *  @param _numLogicalIntRegs Number of logical integer registers.
-     *  @param _numPhysicalIntRegs Number of physical integer registers.
-     *  @param _numLogicalFloatRegs Number of logical fp registers.
-     *  @param _numPhysicalFloatRegs Number of physical fp registers.
+     *  @param _numPhysicalRegs Number of physical registers.
      *  @param _numMiscRegs Number of miscellaneous registers.
-     *  @param _zeroRegIdx Index of the zero register.
      */
-    Scoreboard(unsigned activeThreads,
-               unsigned _numLogicalIntRegs,
-               unsigned _numPhysicalIntRegs,
-               unsigned _numLogicalFloatRegs,
-               unsigned _numPhysicalFloatRegs,
-               unsigned _numMiscRegs,
-               unsigned _zeroRegIdx);
+    Scoreboard(const std::string &_my_name, unsigned _numPhysicalRegs);
 
     /** Destructor. */
     ~Scoreboard() {}
 
     /** Returns the name of the scoreboard. */
-    std::string name() const;
+    std::string name() const { return _name; };
 
     /** Checks if the register is ready. */
-    bool getReg(PhysRegIndex ready_reg);
+    bool
+    getReg(PhysRegIdPtr phys_reg) const
+    {
+        if (phys_reg->isFixedMapping()) {
+            // Fixed mapping regs are always ready
+            return true;
+        }
+
+        assert(phys_reg->flatIndex() < numPhysRegs);
+
+        return regScoreBoard[phys_reg->flatIndex()];
+    }
 
     /** Sets the register as ready. */
-    void setReg(PhysRegIndex phys_reg);
+    void
+    setReg(PhysRegIdPtr phys_reg)
+    {
+        if (phys_reg->isFixedMapping()) {
+            // Fixed mapping regs are always ready, ignore attempts to change
+            // that
+            return;
+        }
+
+        assert(phys_reg->flatIndex() < numPhysRegs);
+
+        DPRINTF(Scoreboard, "Setting reg %i (%s) as ready\n",
+                phys_reg->index(), phys_reg->className());
+
+        regScoreBoard[phys_reg->flatIndex()] = true;
+    }
 
     /** Sets the register as not ready. */
-    void unsetReg(PhysRegIndex ready_reg);
-
-  private:
-    /** Scoreboard of physical integer registers, saying whether or not they
-     *  are ready.
-     */
-    std::vector<bool> regScoreBoard;
-
-    /** Number of logical integer registers. */
-    int numLogicalIntRegs;
-
-    /** Number of physical integer registers. */
-    int numPhysicalIntRegs;
-
-    /** Number of logical floating point registers. */
-    int numLogicalFloatRegs;
-
-    /** Number of physical floating point registers. */
-    int numPhysicalFloatRegs;
-
-    /** Number of miscellaneous registers. */
-    int numMiscRegs;
-
-    /** Number of logical integer + float registers. */
-    int numLogicalRegs;
-
-    /** Number of physical integer + float registers. */
-    int numPhysicalRegs;
-
-    /** The logical index of the zero register. */
-    int zeroRegIdx;
-
-    int currentSize;
-
     void
-    resize(int newSize)
+    unsetReg(PhysRegIdPtr phys_reg)
     {
-        currentSize = newSize;
-        regScoreBoard.resize(newSize);
+        if (phys_reg->isFixedMapping()) {
+            // Fixed mapping regs are always ready, ignore attempts to
+            // change that
+            return;
+        }
+
+        assert(phys_reg->flatIndex() < numPhysRegs);
+
+        regScoreBoard[phys_reg->flatIndex()] = false;
     }
 
-    bool
-    indexInBounds(int idx)
-    {
-        return idx < currentSize;
-    }
 };
+
+} // namespace o3
+} // namespace gem5
 
 #endif

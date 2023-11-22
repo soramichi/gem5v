@@ -24,63 +24,50 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * Authors: Kevin Lim
  */
 
-#include "base/intmath.hh"
-#include "base/misc.hh"
-#include "base/trace.hh"
 #include "cpu/pred/2bit_local.hh"
+
+#include "base/intmath.hh"
+#include "base/logging.hh"
+#include "base/trace.hh"
 #include "debug/Fetch.hh"
 
-LocalBP::LocalBP(unsigned _localPredictorSize,
-                 unsigned _localCtrBits,
-                 unsigned _instShiftAmt)
-    : localPredictorSize(_localPredictorSize),
-      localCtrBits(_localCtrBits),
-      instShiftAmt(_instShiftAmt)
+namespace gem5
+{
+
+namespace branch_prediction
+{
+
+LocalBP::LocalBP(const LocalBPParams &params)
+    : BPredUnit(params),
+      localPredictorSize(params.localPredictorSize),
+      localCtrBits(params.localCtrBits),
+      localPredictorSets(localPredictorSize / localCtrBits),
+      localCtrs(localPredictorSets, SatCounter8(localCtrBits)),
+      indexMask(localPredictorSets - 1)
 {
     if (!isPowerOf2(localPredictorSize)) {
         fatal("Invalid local predictor size!\n");
     }
 
-    localPredictorSets = localPredictorSize / localCtrBits;
-
     if (!isPowerOf2(localPredictorSets)) {
         fatal("Invalid number of local predictor sets! Check localCtrBits.\n");
     }
 
-    // Setup the index mask.
-    indexMask = localPredictorSets - 1;
+    DPRINTF(Fetch, "index mask: %#x\n", indexMask);
 
-    DPRINTF(Fetch, "Branch predictor: index mask: %#x\n", indexMask);
-
-    // Setup the array of counters for the local predictor.
-    localCtrs.resize(localPredictorSets);
-
-    for (unsigned i = 0; i < localPredictorSets; ++i)
-        localCtrs[i].setBits(_localCtrBits);
-
-    DPRINTF(Fetch, "Branch predictor: local predictor size: %i\n",
+    DPRINTF(Fetch, "local predictor size: %i\n",
             localPredictorSize);
 
-    DPRINTF(Fetch, "Branch predictor: local counter bits: %i\n", localCtrBits);
+    DPRINTF(Fetch, "local counter bits: %i\n", localCtrBits);
 
-    DPRINTF(Fetch, "Branch predictor: instruction shift amount: %i\n",
+    DPRINTF(Fetch, "instruction shift amount: %i\n",
             instShiftAmt);
 }
 
 void
-LocalBP::reset()
-{
-    for (unsigned i = 0; i < localPredictorSets; ++i) {
-        localCtrs[i].reset();
-    }
-}
-
-void
-LocalBP::BTBUpdate(Addr &branch_addr, void * &bp_history)
+LocalBP::btbUpdate(ThreadID tid, Addr branch_addr, void * &bp_history)
 {
 // Place holder for a function that is called to update predictor history when
 // a BTB entry is invalid or not found.
@@ -88,54 +75,48 @@ LocalBP::BTBUpdate(Addr &branch_addr, void * &bp_history)
 
 
 bool
-LocalBP::lookup(Addr &branch_addr, void * &bp_history)
+LocalBP::lookup(ThreadID tid, Addr branch_addr, void * &bp_history)
 {
     bool taken;
-    uint8_t counter_val;
     unsigned local_predictor_idx = getLocalIndex(branch_addr);
 
-    DPRINTF(Fetch, "Branch predictor: Looking up index %#x\n",
+    DPRINTF(Fetch, "Looking up index %#x\n",
             local_predictor_idx);
 
-    counter_val = localCtrs[local_predictor_idx].read();
+    uint8_t counter_val = localCtrs[local_predictor_idx];
 
-    DPRINTF(Fetch, "Branch predictor: prediction is %i.\n",
+    DPRINTF(Fetch, "prediction is %i.\n",
             (int)counter_val);
 
     taken = getPrediction(counter_val);
-
-#if 0
-    // Speculative update.
-    if (taken) {
-        DPRINTF(Fetch, "Branch predictor: Branch updated as taken.\n");
-        localCtrs[local_predictor_idx].increment();
-    } else {
-        DPRINTF(Fetch, "Branch predictor: Branch updated as not taken.\n");
-        localCtrs[local_predictor_idx].decrement();
-    }
-#endif
 
     return taken;
 }
 
 void
-LocalBP::update(Addr &branch_addr, bool taken, void *bp_history)
+LocalBP::update(ThreadID tid, Addr branch_addr, bool taken, void *bp_history,
+                bool squashed, const StaticInstPtr & inst, Addr corrTarget)
 {
     assert(bp_history == NULL);
     unsigned local_predictor_idx;
 
+    // No state to restore, and we do not update on the wrong
+    // path.
+    if (squashed) {
+        return;
+    }
+
     // Update the local predictor.
     local_predictor_idx = getLocalIndex(branch_addr);
 
-    DPRINTF(Fetch, "Branch predictor: Looking up index %#x\n",
-            local_predictor_idx);
+    DPRINTF(Fetch, "Looking up index %#x\n", local_predictor_idx);
 
     if (taken) {
-        DPRINTF(Fetch, "Branch predictor: Branch updated as taken.\n");
-        localCtrs[local_predictor_idx].increment();
+        DPRINTF(Fetch, "Branch updated as taken.\n");
+        localCtrs[local_predictor_idx]++;
     } else {
-        DPRINTF(Fetch, "Branch predictor: Branch updated as not taken.\n");
-        localCtrs[local_predictor_idx].decrement();
+        DPRINTF(Fetch, "Branch updated as not taken.\n");
+        localCtrs[local_predictor_idx]--;
     }
 }
 
@@ -153,3 +134,11 @@ LocalBP::getLocalIndex(Addr &branch_addr)
 {
     return (branch_addr >> instShiftAmt) & indexMask;
 }
+
+void
+LocalBP::uncondBranch(ThreadID tid, Addr pc, void *&bp_history)
+{
+}
+
+} // namespace branch_prediction
+} // namespace gem5

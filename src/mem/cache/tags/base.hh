@@ -1,4 +1,16 @@
 /*
+ * Copyright (c) 2012-2014,2016-2019 ARM Limited
+ * All rights reserved.
+ *
+ * The license below extends only to copyright in the software and shall
+ * not be construed as granting a license to any other intellectual
+ * property including but not limited to intellectual property relating
+ * to a hardware implementation of the functionality of the software
+ * licensed hereunder.  You may use the software subject to the license
+ * terms below provided that you ensure that this notice is replicated
+ * unmodified and in its entirety in all distributions of the software,
+ * modified or unmodified, in source code or in binary form.
+ *
  * Copyright (c) 2003-2005 The Regents of The University of Michigan
  * All rights reserved.
  *
@@ -24,9 +36,6 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * Authors: Erik Hallnor
- *          Ron Dreslinski
  */
 
 /**
@@ -34,80 +43,123 @@
  * Declaration of a common base class for cache tagstore objects.
  */
 
-#ifndef __BASE_TAGS_HH__
-#define __BASE_TAGS_HH__
+#ifndef __MEM_CACHE_TAGS_BASE_HH__
+#define __MEM_CACHE_TAGS_BASE_HH__
 
+#include <cassert>
+#include <cstdint>
+#include <functional>
 #include <string>
 
 #include "base/callback.hh"
+#include "base/logging.hh"
 #include "base/statistics.hh"
+#include "base/types.hh"
+#include "mem/cache/cache_blk.hh"
+#include "mem/packet.hh"
+#include "params/BaseTags.hh"
+#include "sim/clocked_object.hh"
 
-class BaseCache;
+namespace gem5
+{
+
+class System;
+class IndexingPolicy;
+class ReplaceableEntry;
 
 /**
  * A common base class of Cache tagstore objects.
  */
-class BaseTags
+class BaseTags : public ClockedObject
 {
   protected:
-    /** Pointer to the parent cache. */
-    BaseCache *cache;
+    /** The block size of the cache. */
+    const unsigned blkSize;
+    /** Mask out all bits that aren't part of the block offset. */
+    const Addr blkMask;
+    /** The size of the cache. */
+    const unsigned size;
+    /** The tag lookup latency of the cache. */
+    const Cycles lookupLatency;
 
-    /** Local copy of the parent cache name. Used for DPRINTF. */
-    std::string objName;
+    /** System we are currently operating in. */
+    System *system;
+
+    /** Indexing policy */
+    BaseIndexingPolicy *indexingPolicy;
 
     /**
      * The number of tags that need to be touched to meet the warmup
      * percentage.
      */
-    int warmupBound;
+    const unsigned warmupBound;
     /** Marked true when the cache is warmed up. */
     bool warmedUp;
 
     /** the number of blocks in the cache */
-    unsigned numBlocks;
+    const unsigned numBlocks;
 
-    // Statistics
-    /**
-     * @addtogroup CacheStatistics
-     * @{
-     */
-
-    /** Number of replacements of valid blocks per thread. */
-    Stats::Vector replacements;
-    /** Per cycle average of the number of tags that hold valid data. */
-    Stats::Average tagsInUse;
-
-    /** The total number of references to a block before it is replaced. */
-    Stats::Scalar totalRefs;
+    /** The data blocks, 1 per cache block. */
+    std::unique_ptr<uint8_t[]> dataBlks;
 
     /**
-     * The number of reference counts sampled. This is different from
-     * replacements because we sample all the valid blocks when the simulator
-     * exits.
+     * TODO: It would be good if these stats were acquired after warmup.
      */
-    Stats::Scalar sampledRefs;
+    struct BaseTagStats : public statistics::Group
+    {
+        BaseTagStats(BaseTags &tags);
 
-    /**
-     * Average number of references to a block before is was replaced.
-     * @todo This should change to an average stat once we have them.
-     */
-    Stats::Formula avgRefs;
+        void regStats() override;
+        void preDumpStats() override;
 
-    /** The cycle that the warmup percentage was hit. */
-    Stats::Scalar warmupCycle;
+        BaseTags &tags;
 
-    /** Average occupancy of each requestor using the cache */
-    Stats::AverageVector occupancies;
+        /** Per tick average of the number of tags that hold valid data. */
+        statistics::Average tagsInUse;
 
-    /** Average occ % of each requestor using the cache */
-    Stats::Formula avgOccs;
+        /** The total number of references to a block before it is replaced. */
+        statistics::Scalar totalRefs;
 
-    /**
-     * @}
-     */
+        /**
+         * The number of reference counts sampled. This is different
+         * from replacements because we sample all the valid blocks
+         * when the simulator exits.
+         */
+        statistics::Scalar sampledRefs;
+
+        /**
+         * Average number of references to a block before is was replaced.
+         * @todo This should change to an average stat once we have them.
+         */
+        statistics::Formula avgRefs;
+
+        /** The tick that the warmup percentage was hit. 0 on failure. */
+        statistics::Scalar warmupTick;
+
+        /** Average occupancy of each requestor using the cache */
+        statistics::AverageVector occupancies;
+
+        /** Average occ % of each requestor using the cache */
+        statistics::Formula avgOccs;
+
+        /** Occupancy of each context/cpu using the cache */
+        statistics::Vector occupanciesTaskId;
+
+        /** Occupancy of each context/cpu using the cache */
+        statistics::Vector2d ageTaskId;
+
+        /** Occ ratio of each context/cpu using the cache */
+        statistics::Formula ratioOccsTaskId;
+
+        /** Number of tags consulted over all accesses. */
+        statistics::Scalar tagAccesses;
+        /** Number of data blocks consulted over all accesses. */
+        statistics::Scalar dataAccesses;
+    } stats;
 
   public:
+    typedef BaseTagsParams Params;
+    BaseTags(const Params &p);
 
     /**
      * Destructor.
@@ -115,46 +167,204 @@ class BaseTags
     virtual ~BaseTags() {}
 
     /**
-     * Set the parent cache back pointer. Also copies the cache name to
-     * objName.
-     * @param _cache Pointer to parent cache.
+     * Initialize blocks. Must be overriden by every subclass that uses
+     * a block type different from its parent's, as the current Python
+     * code generation does not allow templates.
      */
-    void setCache(BaseCache *_cache);
-
-    /**
-     * Return the parent cache name.
-     * @return the parent cache name.
-     */
-    const std::string &name() const
-    {
-        return objName;
-    }
-
-    /**
-     * Register local statistics.
-     * @param name The name to preceed each statistic name.
-     */
-    void regStats(const std::string &name);
+    virtual void tagsInit() = 0;
 
     /**
      * Average in the reference count for valid blocks when the simulation
      * exits.
      */
-    virtual void cleanupRefs() {}
+    void cleanupRefs();
 
     /**
-     *iterated through all blocks and clear all locks
-     *Needed to clear all lock tracking at once
+     * Computes stats just prior to dump event
      */
-    virtual void clearLocks() {}
+    void computeStats();
+
+    /**
+     * Print all tags used
+     */
+    std::string print();
+
+    /**
+     * Finds the block in the cache without touching it.
+     *
+     * @param addr The address to look for.
+     * @param is_secure True if the target memory space is secure.
+     * @return Pointer to the cache block.
+     */
+    virtual CacheBlk *findBlock(Addr addr, bool is_secure) const;
+
+    /**
+     * Find a block given set and way.
+     *
+     * @param set The set of the block.
+     * @param way The way of the block.
+     * @return The block.
+     */
+    virtual ReplaceableEntry* findBlockBySetAndWay(int set, int way) const;
+
+    /**
+     * Align an address to the block size.
+     * @param addr the address to align.
+     * @return The block address.
+     */
+    Addr blkAlign(Addr addr) const
+    {
+        return addr & ~blkMask;
+    }
+
+    /**
+     * Calculate the block offset of an address.
+     * @param addr the address to get the offset of.
+     * @return the block offset.
+     */
+    int extractBlkOffset(Addr addr) const
+    {
+        return (addr & blkMask);
+    }
+
+    /**
+     * Limit the allocation for the cache ways.
+     * @param ways The maximum number of ways available for replacement.
+     */
+    virtual void setWayAllocationMax(int ways)
+    {
+        panic("This tag class does not implement way allocation limit!\n");
+    }
+
+    /**
+     * Get the way allocation mask limit.
+     * @return The maximum number of ways available for replacement.
+     */
+    virtual int getWayAllocationMax() const
+    {
+        panic("This tag class does not implement way allocation limit!\n");
+        return -1;
+    }
+
+    /**
+     * This function updates the tags when a block is invalidated
+     *
+     * @param blk A valid block to invalidate.
+     */
+    virtual void invalidate(CacheBlk *blk)
+    {
+        assert(blk);
+        assert(blk->isValid());
+
+        stats.occupancies[blk->getSrcRequestorId()]--;
+        stats.totalRefs += blk->getRefCount();
+        stats.sampledRefs++;
+
+        blk->invalidate();
+    }
+
+    /**
+     * Find replacement victim based on address. If the address requires
+     * blocks to be evicted, their locations are listed for eviction. If a
+     * conventional cache is being used, the list only contains the victim.
+     * However, if using sector or compressed caches, the victim is one of
+     * the blocks to be evicted, but its location is the only one that will
+     * be assigned to the newly allocated block associated to this address.
+     * @sa insertBlock
+     *
+     * @param addr Address to find a victim for.
+     * @param is_secure True if the target memory space is secure.
+     * @param size Size, in bits, of new block to allocate.
+     * @param evict_blks Cache blocks to be evicted.
+     * @return Cache block to be replaced.
+     */
+    virtual CacheBlk* findVictim(Addr addr, const bool is_secure,
+                                 const std::size_t size,
+                                 std::vector<CacheBlk*>& evict_blks) = 0;
+
+    /**
+     * Access block and update replacement data. May not succeed, in which case
+     * nullptr is returned. This has all the implications of a cache access and
+     * should only be used as such. Returns the tag lookup latency as a side
+     * effect.
+     *
+     * @param pkt The packet holding the address to find.
+     * @param lat The latency of the tag lookup.
+     * @return Pointer to the cache block if found.
+     */
+    virtual CacheBlk* accessBlock(const PacketPtr pkt, Cycles &lat) = 0;
+
+    /**
+     * Generate the tag from the given address.
+     *
+     * @param addr The address to get the tag from.
+     * @return The tag of the address.
+     */
+    virtual Addr extractTag(const Addr addr) const;
+
+    /**
+     * Insert the new block into the cache and update stats.
+     *
+     * @param pkt Packet holding the address to update
+     * @param blk The block to update.
+     */
+    virtual void insertBlock(const PacketPtr pkt, CacheBlk *blk);
+
+    /**
+     * Move a block's metadata to another location decided by the replacement
+     * policy. It behaves as a swap, however, since the destination block
+     * should be invalid, the result is a move.
+     *
+     * @param src_blk The source block.
+     * @param dest_blk The destination block. Must be invalid.
+     */
+    virtual void moveBlock(CacheBlk *src_blk, CacheBlk *dest_blk);
+
+    /**
+     * Regenerate the block address.
+     *
+     * @param block The block.
+     * @return the block address.
+     */
+    virtual Addr regenerateBlkAddr(const CacheBlk* blk) const = 0;
+
+    /**
+     * Visit each block in the tags and apply a visitor
+     *
+     * The visitor should be a std::function that takes a cache block
+     * reference as its parameter.
+     *
+     * @param visitor Visitor to call on each block.
+     */
+    virtual void forEachBlk(std::function<void(CacheBlk &)> visitor) = 0;
+
+    /**
+     * Find if any of the blocks satisfies a condition
+     *
+     * The visitor should be a std::function that takes a cache block
+     * reference as its parameter. The visitor will terminate the
+     * traversal early if the condition is satisfied.
+     *
+     * @param visitor Visitor to call on each block.
+     */
+    virtual bool anyBlk(std::function<bool(CacheBlk &)> visitor) = 0;
+
+  private:
+    /**
+     * Update the reference stats using data from the input block
+     *
+     * @param blk The input block
+     */
+    void cleanupRefsVisitor(CacheBlk &blk);
+
+    /**
+     * Update the occupancy and age stats using data from the input block
+     *
+     * @param blk The input block
+     */
+    void computeStatsVisitor(CacheBlk &blk);
 };
 
-class BaseTagsCallback : public Callback
-{
-    BaseTags *tags;
-  public:
-    BaseTagsCallback(BaseTags *t) : tags(t) {}
-    virtual void process() { tags->cleanupRefs(); };
-};
+} // namespace gem5
 
-#endif //__BASE_TAGS_HH__
+#endif //__MEM_CACHE_TAGS_BASE_HH__

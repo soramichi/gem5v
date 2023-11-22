@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2018 ARM Limited
+ * All rights reserved
+ *
  * Copyright (c) 2001-2005 The Regents of The University of Michigan
  * All rights reserved.
  *
@@ -24,35 +27,24 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * Authors: Nathan Binkert
- *          Steve Reinhardt
  */
 
-#ifndef __STR_HH__
-#define __STR_HH__
+#ifndef __BASE_STR_HH__
+#define __BASE_STR_HH__
 
-#include <cctype>
+#include <algorithm>
 #include <cstring>
-#include <sstream>
+#include <limits>
+#include <locale>
+#include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <vector>
 
-template<class> class Hash;
-template<>
-class Hash<std::string> {
-public:
-  unsigned operator()(const std::string &s) {
-      std::string::const_iterator i = s.begin();
-      std::string::const_iterator end = s.end();
-      unsigned hash = 5381;
+#include "base/logging.hh"
 
-      while (i < end)
-          hash = ((hash << 5) + hash) + *i++;
-
-      return hash;
-  }
-};
+namespace gem5
+{
 
 inline void
 eat_lead_white(std::string &s)
@@ -87,19 +79,21 @@ to_lower(const std::string &s)
 
     lower.reserve(len);
 
-    for (int i = 0; i < len; ++i)
-        lower.push_back(tolower(s[i]));
+    for (const auto &c : s)
+        lower.push_back(std::tolower(c));
 
     return lower;
 }
 
 // Split the string s into lhs and rhs on the first occurence of the
-// character c.
+// character c. Character c is not included in either lhs or rhs. If
+// character c is not contained within string s, lsh equals s.
 bool
 split_first(const std::string &s, std::string &lhs, std::string &rhs, char c);
 
 // Split the string s into lhs and rhs on the last occurence of the
-// character c.
+// character c. Character c is not included in either lhs or rhs. If
+// character c is not contained within string s, lhs equals s.
 bool
 split_last(const std::string &s, std::string &lhs, std::string &rhs, char c);
 
@@ -111,16 +105,103 @@ void
 tokenize(std::vector<std::string> &vector, const std::string &s,
          char token, bool ign = true);
 
-template <class T> bool
-to_number(const std::string &value, T &retval);
+/**
+ * @{
+ *
+ * @name String to number helper functions for signed and unsigned
+ *       integeral type, as well as enums and floating-point types.
+ */
 
 template <class T>
-inline std::string
-to_string(const T &value)
+typename std::enable_if_t<std::is_integral_v<T>, T>
+__to_number(const std::string &value)
 {
-    std::stringstream str;
-    str << value;
-    return str.str();
+    // Cannot parse scientific numbers
+    if (value.find('e') != std::string::npos) {
+        throw std::invalid_argument("Cannot convert scientific to integral");
+    }
+    // start big and narrow it down if needed, determine the base dynamically
+    if constexpr (std::is_signed_v<T>) {
+        long long r = std::stoll(value, nullptr, 0);
+        if (r < std::numeric_limits<T>::lowest()
+            || r > std::numeric_limits<T>::max()) {
+            throw std::out_of_range("Out of range");
+        }
+        return static_cast<T>(r);
+    } else {
+        unsigned long long r = std::stoull(value, nullptr, 0);
+        if (r > std::numeric_limits<T>::max())
+            throw std::out_of_range("Out of range");
+        return static_cast<T>(r);
+    }
+}
+
+template <class T>
+typename std::enable_if_t<std::is_enum_v<T>, T>
+__to_number(const std::string &value)
+{
+    auto r = __to_number<typename std::underlying_type_t<T>>(value);
+    return static_cast<T>(r);
+}
+
+template <class T>
+typename std::enable_if_t<std::is_floating_point_v<T>, T>
+__to_number(const std::string &value)
+{
+    // start big and narrow it down if needed
+    long double r = std::stold(value);
+    if (r < std::numeric_limits<T>::lowest()
+        || r > std::numeric_limits<T>::max()) {
+        throw std::out_of_range("Out of range");
+    }
+    return static_cast<T>(r);
+}
+/** @} */
+
+/**
+ * Turn a string representation of a number, either integral, floating point,
+ * or enum into an actual number. Use to_bool for booleans.
+ *
+ * @param value The string representing the number
+ * @param retval The resulting value
+ * @return True if the parsing was successful
+ */
+template <class T>
+inline std::enable_if_t<(std::is_integral_v<T> ||
+                         std::is_floating_point_v<T> ||
+                         std::is_enum_v<T>) &&
+                        !std::is_same_v<bool, T>, bool>
+to_number(const std::string &value, T &retval)
+{
+    try {
+        retval = __to_number<T>(value);
+        return true;
+    } catch (const std::out_of_range&) {
+        return false;
+    } catch (const std::invalid_argument&) {
+        return false;
+    } catch (...) {
+        panic("Unrecognized exception.\n");
+    }
+}
+
+/**
+ * Turn a string representation of a boolean into a boolean value.
+ */
+inline bool
+to_bool(const std::string &value, bool &retval)
+{
+    std::string s = to_lower(value);
+
+    if (s == "true") {
+        retval = true;
+        return true;
+    } else if (s == "false") {
+        retval = false;
+        return true;
+    }
+
+    return false;
 }
 
 // Put quotes around string arg if it contains spaces.
@@ -171,5 +252,14 @@ startswith(const std::string &s, const std::string &prefix)
     return (s.compare(0, prefix.size(), prefix) == 0);
 }
 
+inline std::string
+replace(const std::string &s, char from, char to)
+{
+    std::string replaced = s;
+    std::replace(replaced.begin(), replaced.end(), from, to);
+    return replaced;
+}
 
-#endif //__STR_HH__
+} // namespace gem5
+
+#endif //__BASE_STR_HH__

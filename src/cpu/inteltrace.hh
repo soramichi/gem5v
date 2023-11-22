@@ -24,9 +24,6 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * Authors: Steve Reinhardt
- *          Nathan Binkert
  */
 
 #ifndef __CPU_INTELTRACE_HH__
@@ -35,22 +32,23 @@
 #include "base/trace.hh"
 #include "base/types.hh"
 #include "cpu/static_inst.hh"
+#include "cpu/thread_context.hh"
 #include "debug/ExecEnable.hh"
-#include "debug/ExecSpeculative.hh"
 #include "params/IntelTrace.hh"
 #include "sim/insttracer.hh"
 
-class ThreadContext;
+namespace gem5
+{
 
-namespace Trace {
+namespace trace {
 
 class IntelTraceRecord : public InstRecord
 {
   public:
     IntelTraceRecord(Tick _when, ThreadContext *_thread,
-               const StaticInstPtr _staticInst, TheISA::PCState _pc,
-               bool spec, const StaticInstPtr _macroStaticInst = NULL)
-        : InstRecord(_when, _thread, _staticInst, _pc, spec,
+               const StaticInstPtr _staticInst, const PCStateBase &_pc,
+               const StaticInstPtr _macroStaticInst = NULL)
+        : InstRecord(_when, _thread, _staticInst, _pc,
                 _macroStaticInst)
     {
     }
@@ -62,28 +60,22 @@ class IntelTrace : public InstTracer
 {
   public:
 
-    IntelTrace(const IntelTraceParams *p) : InstTracer(p)
+    IntelTrace(const IntelTraceParams &p) : InstTracer(p)
     {}
 
     IntelTraceRecord *
     getInstRecord(Tick when, ThreadContext *tc,
-            const StaticInstPtr staticInst, TheISA::PCState pc,
+            const StaticInstPtr staticInst, const PCStateBase &pc,
             const StaticInstPtr macroStaticInst = NULL)
     {
-        if (!Debug::ExecEnable)
+        if (!debug::ExecEnable)
             return NULL;
 
-        if (!Trace::enabled)
-            return NULL;
-
-        if (!Debug::ExecSpeculative && tc->misspeculating())
-            return NULL;
-
-        return new IntelTraceRecord(when, tc,
-                staticInst, pc, tc->misspeculating(), macroStaticInst);
+        return new IntelTraceRecord(when, tc, staticInst, pc, macroStaticInst);
     }
 };
 
-} // namespace Trace
+} // namespace trace
+} // namespace gem5
 
 #endif // __CPU_INTELTRACE_HH__
